@@ -118,7 +118,10 @@ test('cloud backup replaces one user snapshot and can be restored', async (t) =>
 test('WeChat login start refuses to run until credentials are configured', async (t) => {
   const app = await makeServer()
   t.after(app.close)
-  const response = await fetch(`${app.baseUrl}/api/auth/wechat/start`)
+  const response = await fetch(`${app.baseUrl}/api/auth/wechat/start`, {
+    method: 'POST',
+    headers: { origin: 'http://localhost:8090' },
+  })
   assert.equal(response.status, 503)
 })
 
