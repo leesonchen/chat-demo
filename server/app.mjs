@@ -98,7 +98,7 @@ const wechatCallback = async (url, res, { db, config, fetchImpl, now }) => {
   } catch { html(res, 502, config.appOrigin, false) }
 }
 const writeBackup = async (req, directory, userId) => {
-  await mkdir(directory, { recursive: true })
+  await mkdir(directory, { recursive: true, mode: 0o700 })
   const fileName = `${userId}.${randomUUID()}.zip`, destination = path.join(directory, fileName), temporary = `${destination}.tmp`
   const digest = createHash('sha256'); let size = 0; let prefix = Buffer.alloc(0)
   const limiter = new Transform({ transform(chunk, encoding, callback) {
