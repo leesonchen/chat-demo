@@ -152,13 +152,13 @@ export const createAppServer = ({ db, config, fetchImpl = fetch, now = Date.now 
       if (url.pathname === '/api/account/api-key' && method === 'GET') {
         const { user } = requireUser(req, db, time)
         const secret = db.prepare('SELECT ciphertext, iv, auth_tag FROM user_secrets WHERE user_id = ?').get(user.id)
-        return json(res, 200, { apiKey: secret ? decryptSecret({ ciphertext: secret.ciphertext, iv: secret.iv, tag: secret.auth_tag }, config.encryptionKey) : null })
+        return json(res, 200, { apiKey: secret ? decryptSecret({ ciphertext: secret.ciphertext, iv: secret.iv, tag: secret.auth_tag }, config.encryptionKey, user.id) : null })
       }
       if (url.pathname === '/api/account/api-key' && method === 'PUT') {
         verifyOrigin(req, config); const { user } = requireUser(req, db, time); const body = await readJson(req)
         const apiKey = typeof body.apiKey === 'string' ? body.apiKey.trim() : ''
         if (!apiKey || apiKey.length > 2048) throw new HttpError(400, 'invalid_api_key')
-        const secret = encryptSecret(apiKey, config.encryptionKey)
+        const secret = encryptSecret(apiKey, config.encryptionKey, user.id)
         db.prepare(`INSERT INTO user_secrets (user_id, ciphertext, iv, auth_tag, updated_at) VALUES (?, ?, ?, ?, ?)
           ON CONFLICT(user_id) DO UPDATE SET ciphertext = excluded.ciphertext, iv = excluded.iv, auth_tag = excluded.auth_tag, updated_at = excluded.updated_at`).run(user.id, secret.ciphertext, secret.iv, secret.tag, time)
         return json(res, 200, { saved: true })
