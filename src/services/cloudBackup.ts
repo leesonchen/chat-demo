@@ -2,7 +2,9 @@ import { exportHistory, importHistory } from './chat/backup.js'
 import { refreshCloudBackupInfo, useAuthStore } from './auth.js'
 
 const ensureSignedIn = () => {
-  if (!useAuthStore.getState().user) throw new Error('authentication_required')
+  if (!useAuthStore.getState().user) {
+    throw new Error('authentication_required')
+  }
 }
 const readError = async (response: Response) => {
   const body = (await response.json().catch(() => null)) as { error?: { code?: string } } | null
@@ -21,7 +23,9 @@ export const exportHistoryToServer = async () => {
     method: 'PUT', credentials: 'same-origin', cache: 'no-store',
     headers: { 'Content-Type': 'application/zip' }, body: blob,
   })
-  if (!response.ok) throw new Error(await readError(response))
+  if (!response.ok) {
+    throw new Error(await readError(response))
+  }
   await refreshCloudBackupInfo()
 }
 export const importHistoryFromServer = async () => {
@@ -29,11 +33,15 @@ export const importHistoryFromServer = async () => {
   const response = await fetch('/api/backup', { credentials: 'same-origin', cache: 'no-store' })
   if (!response.ok) throw new Error(await readError(response))
   const blob = await response.blob()
-  if (!blob.size) throw new Error('empty_backup')
+  if (!blob.size) {
+    throw new Error('empty_backup')
+  }
   const expected = response.headers.get('X-Backup-SHA256')
   if (expected) {
     const actual = await digest(blob)
-    if (actual && actual !== expected) throw new Error('backup_checksum_mismatch')
+    if (actual && actual !== expected) {
+      throw new Error('backup_checksum_mismatch')
+    }
   }
   const file = new File([blob], 'chat-demo-cloud-backup.zip', { type: 'application/zip' })
   return importHistory(file)
