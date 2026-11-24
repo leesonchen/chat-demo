@@ -109,7 +109,7 @@ export const zh = {
   wechatAccountSettings: '账号与数据管理',
   wechatLogout: '退出登录',
   apiKeyCloudPrompt: '保存 API Key 到账号',
-  apiKeyCloudPromptDescription: '保存后，在其他设备微信扫码登录即可恢复 API Key。',
+  apiKeyCloudPromptDescription: '请先确认本机 API Key 属于当前微信账号。保存后，在其他设备扫码登录即可恢复。',
   apiKeyCloudSaved: 'API Key 已加密保存到账号',
   apiKeyCloudSaveFailed: 'API Key 已保存在本机，但保存到云端失败，请重试',
   saveToCloud: '保存到服务器',
