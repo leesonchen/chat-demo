@@ -88,7 +88,7 @@ export const createConfig = ({
   performance: { hints: false },
   devServer: {
     port: 8090,
-    proxy: { '/api': { target: 'http://127.0.0.1:8091', changeOrigin: true } },
+    proxy: [{ context: ['/api'], target: 'http://127.0.0.1:8091', changeOrigin: true }],
     ...devServer,
   },
 })
