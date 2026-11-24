@@ -483,26 +483,34 @@ const useHistoryImport = () => {
   const [status, setStatus] = useState<Status>(null)
   const importing = useRef(false)
 
-  const confirm = async () => {
-    if (!file || importing.current) {
-      return
-    }
+  const runImport = async (task: () => Promise<number>, failureKey: TranslationKey) => {
+    if (importing.current) return
     importing.current = true
     setFile(null)
     setBusy(true)
     setStatus(null)
     try {
-      const count = await importHistory(file)
+      const count = await task()
       setStatus({ key: count === 1 ? 'historyImportedOne' : 'historyImported', params: { count } })
-    } catch {
-      setStatus({ key: 'historyImportFailed', error: true })
+    } catch (error) {
+      setStatus(error instanceof Error && error.message === 'backup_not_found'
+        ? { key: 'cloudBackupMissing', error: true }
+        : failureKey === 'cloudImportFailed'
+          ? errorStatus(failureKey, error)
+          : { key: failureKey, error: true })
     } finally {
       importing.current = false
       setBusy(false)
     }
   }
+  const confirm = () => {
+    if (!file) return Promise.resolve()
+    const selected = file
+    return runImport(() => importHistory(selected), 'historyImportFailed')
+  }
+  const importFromServer = () => runImport(importHistoryFromServer, 'cloudImportFailed')
 
-  return { file, busy, status, select: setFile, cancel: () => setFile(null), confirm }
+  return { file, busy, status, select: setFile, cancel: () => setFile(null), confirm, importFromServer }
 }
 
 /** 导入 = 覆盖：用选中文件替换本地全部会话与附件。 */
@@ -517,41 +525,29 @@ const ImportHistory = ({
   const inputRef = useRef<HTMLInputElement>(null)
   const user = useAuthStore((state) => state.user)
   const backupInfo = useAuthStore((state) => state.backupInfo)
-  const [cloudBusy, setCloudBusy] = useState(false)
-  const [cloudStatus, setCloudStatus] = useState<Status>(null)
-  const cloudDescription = backupInfo?.exists
-    ? t('cloudBackupAvailable', { date: new Date(backupInfo.updatedAt ?? '').toLocaleString() })
-    : t('cloudBackupNotAvailable')
+  const cloudDescription = backupInfo
+    ? backupInfo.exists
+      ? t('cloudBackupAvailable', { date: new Date(backupInfo.updatedAt ?? '').toLocaleString() })
+      : t('cloudBackupNotAvailable')
+    : t('historyImportDescription')
 
-  const onCloudImport = async () => {
-    if (!user || cloudBusy || !window.confirm(t('cloudImportConfirmDescription'))) return
-    setCloudBusy(true)
-    setCloudStatus(null)
-    try {
-      const count = await importHistoryFromServer()
-      setCloudStatus({ key: count === 1 ? 'historyImportedOne' : 'historyImported', params: { count } })
-    } catch (error) {
-      setCloudStatus(error instanceof Error && error.message === 'backup_not_found'
-        ? { key: 'cloudBackupMissing', error: true }
-        : errorStatus('cloudImportFailed', error))
-    } finally {
-      setCloudBusy(false)
-      void refreshCloudBackupInfo()
-    }
+  const onCloudImport = () => {
+    if (!user || historyImport.busy || !window.confirm(t('cloudImportConfirmDescription'))) return
+    void historyImport.importFromServer().finally(() => refreshCloudBackupInfo())
   }
 
   return (
     <SettingCell
       label={t('historyImport')}
-      description={backupInfo ? cloudDescription : t('historyImportDescription')}
-      status={cloudStatus ?? historyImport.status}
+      description={cloudDescription}
+      status={historyImport.status}
       action={
         <>
           <Button
             variant="outlined"
             size="m"
             className={clsx(styles.cellButton, styles.uploadButton)}
-            disabled={disabled || cloudBusy}
+            disabled={disabled || historyImport.busy}
             onClick={() => inputRef.current?.click()}
           >
             <IconUploadOutline14 />
@@ -561,7 +557,7 @@ const ImportHistory = ({
             variant="outlined"
             size="m"
             className={styles.cellButton}
-            disabled={disabled || cloudBusy || !user}
+            disabled={disabled || historyImport.busy || !user}
             onClick={() => void onCloudImport()}
           >
             <IconDownloadOutline16 />
@@ -591,7 +587,6 @@ const ExportHistory = ({ disabled }: { disabled: boolean }) => {
   const user = useAuthStore((state) => state.user)
   const backupInfo = useAuthStore((state) => state.backupInfo)
   const [busy, setBusy] = useState(false)
-  const [cloudBusy, setCloudBusy] = useState(false)
   const [status, setStatus] = useState<Status>(null)
 
   const onExport = async () => {
@@ -612,8 +607,8 @@ const ExportHistory = ({ disabled }: { disabled: boolean }) => {
     }
   }
   const onCloudExport = async () => {
-    if (!user || cloudBusy || !window.confirm(t('cloudExportConfirmDescription'))) return
-    setCloudBusy(true)
+    if (!user || busy || !window.confirm(t('cloudExportConfirmDescription'))) return
+    setBusy(true)
     setStatus(null)
     try {
       await exportHistoryToServer()
@@ -621,7 +616,7 @@ const ExportHistory = ({ disabled }: { disabled: boolean }) => {
     } catch (error) {
       setStatus(errorStatus('cloudExportFailed', error))
     } finally {
-      setCloudBusy(false)
+      setBusy(false)
       void refreshCloudBackupInfo()
     }
   }
@@ -650,7 +645,7 @@ const ExportHistory = ({ disabled }: { disabled: boolean }) => {
             variant="outlined"
             size="m"
             className={styles.cellButton}
-            disabled={disabled || cloudBusy || empty || !user}
+            disabled={disabled || busy || empty || !user}
             onClick={() => void onCloudExport()}
           >
             <IconUploadOutline14 />
