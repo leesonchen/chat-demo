@@ -122,9 +122,14 @@ export const saveApiKeyToCloud = async (apiKey: string) => {
   if (!user) {
     return
   }
-  await request<{ saved: boolean }>('/api/account/api-key', {
-    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ apiKey }),
-  })
+  try {
+    await request<{ saved: boolean }>('/api/account/api-key', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ apiKey }),
+    })
+  } catch (error) {
+    useAuthStore.setState({ needsKeyUpload: true })
+    throw error
+  }
   writeKeyOwner(user.id)
   useAuthStore.setState({ needsKeyUpload: false })
 }
