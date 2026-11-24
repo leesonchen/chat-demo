@@ -59,6 +59,9 @@ importers:
       prismjs:
         specifier: 1.30.0
         version: 1.30.0
+      qrcode-generator:
+        specifier: 2.0.4
+        version: 2.0.4
       react:
         specifier: 18.3.1
         version: 18.3.1
@@ -2584,6 +2587,9 @@ snapshots:
   prismjs@1.30.0: {}
 
   quansync@0.2.11: {}
+
+  qrcode-generator@2.0.4:
+    resolution: {integrity: sha512-mZSiP6RnbHl4xL2Ap5HfkjLnmxfKcPWpWe/c+5XxCuetEenqmNFf1FH/ftXPCtFG5/TDobjsjz6sSNL0Sr8Z9g==}
 
   react-dom@18.3.1(react@18.3.1):
     dependencies:
