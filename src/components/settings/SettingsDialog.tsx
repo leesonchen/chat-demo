@@ -591,7 +591,9 @@ const ImportHistory = ({
             onChange={(event) => {
               const file = event.target.files?.[0]
               event.target.value = ''
-              if (file) historyImport.select(file)
+              if (file) {
+                historyImport.select(file)
+              }
             }}
           />
         </>
