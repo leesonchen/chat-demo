@@ -18,7 +18,7 @@ export const migrateDatabase = (db) => {
 
     CREATE TABLE IF NOT EXISTS oauth_identities (
       id TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL REFERENDES users(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       provider TEXT NOT NULL,
       openid TEXT NOT NULL,
       unionid TEXT,
@@ -31,7 +31,7 @@ export const migrateDatabase = (db) => {
 
     CREATE TABLE IF NOT EXISTS sessions (
       token_hash TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL REFERENDES users(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       expires_at INTEGER NOT NULL,
       created_at INTEGER NOT NULL
     );
