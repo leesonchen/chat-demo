@@ -174,16 +174,20 @@ export const createAppServer = ({ db, config, fetchImpl = fetch, now = Date.now 
         const contentType = String(req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase()
         if (!['application/zip', 'application/x-zip-compressed'].includes(contentType)) throw new HttpError(415, 'unsupported_backup_type')
         if (Number(req.headers['content-length'] ?? 0) > MAX_BACKUP) throw new HttpError(413, 'backup_too_large')
-        const saved = await serializeBackup(user.id, async () => {
-          const next = await writeBackup(req, config.backupDir, user.id)
-          const previous = db.prepare('SELECT file_name FROM user_backups WHERE user_id = ?').get(user.id)
-          try {
-            db.prepare(`INSERT INTO user_backups (user_id, file_name, byte_size, sha256, updated_at) VALUES (?, ?, ?, ?, ?)
-              ON CONFLICT(user_id) DO UPDATE SET file_name = excluded.file_name, byte_size = excluded.byte_size, sha256 = excluded.sha256, updated_at = excluded.updated_at`).run(user.id, next.fileName, next.byteSize, next.digest, now())
-          } catch (error) { await rm(next.destination, { force: true }).catch(() => {}); throw error }
-          if (previous?.file_name) await rm(path.join(config.backupDir, previous.file_name), { force: true }).catch(() => {})
-          return next
-        })
+        const saved = await writeBackup(req, config.backupDir, user.id)
+        try {
+          await serializeBackup(user.id, async () => {
+            const previous = db.prepare('SELECT file_name FROM user_backups WHERE user_id = ?').get(user.id)
+            try {
+              db.prepare(`INSERT INTO user_backups (user_id, file_name, byte_size, sha256, updated_at) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET file_name = excluded.file_name, byte_size = excluded.byte_size, sha256 = excluded.sha256, updated_at = excluded.updated_at`).run(user.id, saved.fileName, saved.byteSize, saved.digest, now())
+            } catch (error) { throw error }
+            if (previous?.file_name) await rm(path.join(config.backupDir, previous.file_name), { force: true }).catch(() => {})
+          })
+        } catch (error) {
+          await rm(saved.destination, { force: true }).catch(() => {})
+          throw error
+        }
         return json(res, 200, { saved: true, byteSize: saved.byteSize, updatedAt: new Date(now()).toISOString() })
       }
       if (method === 'GET' && url.pathname === '/api/backup') {
