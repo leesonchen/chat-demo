@@ -72,6 +72,13 @@ test('account API key is authenticated, encrypted at rest, and scoped to the use
   const restored = await fetch(`${app.baseUrl}/api/account/api-key`, { headers: { cookie } })
   assert.deepEqual(await restored.json(), { apiKey: 'sk-test-api-key' })
 
+  const otherUserId = randomUUID()
+  const otherToken = randomBytes(32).toString('base64url')
+  app.db.prepare('INSERT INTO users (id, nickname, created_at, updated_at) VALUES (?, ?, ?, ?)').run(otherUserId, 'Other User', Date.now(), Date.now())
+  app.db.prepare('INSERT INTO sessions (token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)').run(sha256(otherToken), otherUserId, Date.now() + 60_000, Date.now())
+  const otherKey = await fetch(`${app.baseUrl}/api/account/api-key`, { headers: { cookie: `chat_demo_session=${otherToken}` } })
+  assert.deepEqual(await otherKey.json(), { apiKey: null })
+
   const csrf = await fetch(`${app.baseUrl}/api/account/api-key`, {
     method: 'PUT',
     headers: { cookie, origin: 'https://attacker.example', 'content-type': 'application/json' },
