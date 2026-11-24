@@ -114,7 +114,7 @@ export const en = {
   wechatAccountSettings: 'Account and data settings',
   wechatLogout: 'Sign out',
   apiKeyCloudPrompt: 'Save API Key to your account',
-  apiKeyCloudPromptDescription: 'After saving, sign in with WeChat on another device to restore this API Key.',
+  apiKeyCloudPromptDescription: 'Confirm this local API Key belongs to the current WeChat account. Then sign in on another device to restore it.',
   apiKeyCloudSaved: 'API Key encrypted and saved to your account',
   apiKeyCloudSaveFailed: 'API Key is saved locally, but cloud save failed. Please retry.',
   saveToCloud: 'Save to server',
