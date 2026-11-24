@@ -71,7 +71,7 @@ export const App = () => {
   useEffect(() => {
     void initChat()
     // Restore the signed-in account and its API Key before prompting for a missing key.
-    void initAuth().finally(() => ensureApiKey())
+    initAuth().finally(() => ensureApiKey())
   }, [])
 
   return (
