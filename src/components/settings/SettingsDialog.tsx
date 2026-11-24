@@ -205,7 +205,7 @@ const DeleteAllConfirm = ({
           <Button
             variant="danger"
             disabled={historyDelete.busy}
-            onClick={() => void historyDelete.confirm()}
+            onClick={historyDelete.confirm}
           >
             {t(historyDelete.busy ? 'historyDeleting' : 'deleteAllSessions')}
           </Button>
@@ -379,7 +379,7 @@ const ImportConfirm = ({
           <Button variant="outlined" size="m" autoFocus onClick={historyImport.cancel}>
             {t('cancel')}
           </Button>
-          <Button variant="dangerOutlined" size="m" onClick={() => void historyImport.confirm()}>
+          <Button variant="dangerOutlined" size="m" onClick={historyImport.confirm}>
             {t('historyImportConfirm')}
           </Button>
         </>
