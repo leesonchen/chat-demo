@@ -11,7 +11,9 @@ const readError = async (response: Response) => {
   return body?.error?.code ?? `http_${response.status}`
 }
 const digest = async (blob: Blob) => {
-  if (!globalThis.crypto?.subtle) return null
+  if (!globalThis.crypto?.subtle) {
+    return null
+  }
   const bytes = await blob.arrayBuffer()
   const hash = await globalThis.crypto.subtle.digest('SHA-256', bytes)
   return Array.from(new Uint8Array(hash), (value) => value.toString(16).padStart(2, '0')).join('')
@@ -31,7 +33,9 @@ export const exportHistoryToServer = async () => {
 export const importHistoryFromServer = async () => {
   ensureSignedIn()
   const response = await fetch('/api/backup', { credentials: 'same-origin', cache: 'no-store' })
-  if (!response.ok) throw new Error(await readError(response))
+  if (!response.ok) {
+    throw new Error(await readError(response))
+  }
   const blob = await response.blob()
   if (!blob.size) {
     throw new Error('empty_backup')
