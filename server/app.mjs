@@ -8,6 +8,7 @@ import { pipeline } from 'node:stream/promises'
 import { decryptSecret, encryptSecret, sha256 } from './security.mjs'
 
 const COOKIE = 'chat_demo_session'
+const OAUTH_STATE_COOKIE = 'chat_demo_oauth_state'
 const SESSION_TTL = 30 * 24 * 60 * 60 * 1000
 const STATE_TTL = 10 * 60 * 1000
 const MAX_JSON = 64 * 1024
@@ -35,6 +36,8 @@ const cookies = (header = '') => Object.fromEntries(header.split(';').map((x) =>
 }))
 const setCookie = (token, secure) => `${COOKIE}=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}${secure ? '; Secure' : ''}`
 const clearCookie = (secure) => `${COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0${secure ? '; Secure' : ''}`
+const oauthStateCookie = (state, secure) => `${OAUTH_STATE_COOKIE}=${encodeURIComponent(state)}; HttpOnly; Path=/api/auth/wechat/callback; SameSite=Lax; Max-Age=${STATE_TTL / 1000}${secure ? '; Secure' : ''}`
+const clearOauthStateCookie = (secure) => `${OAUTH_STATE_COOKIE}=; HttpOnly; Path=/api/auth/wechat/callback; SameSite=Lax; Max-Age=0${secure ? '; Secure' : ''}`
 const readJson = async (req) => {
   const chunks = []; let size = 0
   for await (const chunk of req) { size += chunk.length; if (size > MAX_JSON) throw new HttpError(413, 'body_too_large'); chunks.push(chunk) }
@@ -75,13 +78,13 @@ const findOrCreateUser = (db, profile, now) => {
     return db.prepare('SELECT id, nickname, avatar_url FROM users WHERE id = ?').get(userId)
   } catch (error) { db.exec('ROLLBACK'); throw error }
 }
-const wechatCallback = async (url, res, { db, config, fetchImpl, now }) => {
+const wechatCallback = async (url, req, res, { db, config, fetchImpl, now }) => {
   const state = url.searchParams.get('state'), code = url.searchParams.get('code')
-  if (!state || !code || !config.wechatAppId || !config.wechatAppSecret) { html(res, 400, config.appOrigin, false); return }
+  if (!state || !code || cookies(req.headers.cookie)[OAUTH_STATE_COOKIE] !== state || !config.wechatAppId || !config.wechatAppSecret) { html(res, 400, config.appOrigin, false, { 'Set-Cookie': clearOauthStateCookie(config.secureCookies) }); return }
   const stateHash = sha256(state)
   const valid = db.prepare('SELECT state_hash FROM oauth_states WHERE state_hash = ? AND expires_at > ?').get(stateHash, now())
   db.prepare('DELETE FROM oauth_states WHERE state_hash = ?').run(stateHash)
-  if (!valid) { html(res, 400, config.appOrigin, false); return }
+  if (!valid) { html(res, 400, config.appOrigin, false, { 'Set-Cookie': clearOauthStateCookie(config.secureCookies) }); return }
   try {
     const tokenUrl = new URL('https://api.weixin.qq.com/sns/oauth2/access_token')
     tokenUrl.search = new URLSearchParams({ appid: config.wechatAppId, secret: config.wechatAppSecret, code, grant_type: 'authorization_code' }).toString()
@@ -94,8 +97,8 @@ const wechatCallback = async (url, res, { db, config, fetchImpl, now }) => {
     const user = findOrCreateUser(db, profile, now())
     const sessionToken = randomBytes(32).toString('base64url')
     db.prepare('INSERT INTO sessions (token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)').run(sha256(sessionToken), user.id, now() + SESSION_TTL, now())
-    html(res, 200, config.appOrigin, true, { 'Set-Cookie': setCookie(sessionToken, config.secureCookies) })
-  } catch { html(res, 502, config.appOrigin, false) }
+    html(res, 200, config.appOrigin, true, { 'Set-Cookie': [setCookie(sessionToken, config.secureCookies), clearOauthStateCookie(config.secureCookies)] })
+  } catch { html(res, 502, config.appOrigin, false, { 'Set-Cookie': clearOauthStateCookie(config.secureCookies) }) }
 }
 const writeBackup = async (req, directory, userId) => {
   await mkdir(directory, { recursive: true, mode: 0o700 })
@@ -137,9 +140,9 @@ export const createAppServer = ({ db, config, fetchImpl = fetch, now = Date.now 
         const authorize = new URL('https://open.weixin.qq.com/connect/qrconnect')
         authorize.search = new URLSearchParams({ appid: config.wechatAppId, redirect_uri: config.wechatRedirectUri, response_type: 'code', scope: 'snsapi_login', state }).toString()
         authorize.hash = 'wechat_redirect'
-        return json(res, 200, { authorizeUrl: authorize.toString() })
+        return json(res, 200, { authorizeUrl: authorize.toString() }, { 'Set-Cookie': oauthStateCookie(state, config.secureCookies) })
       }
-      if (method === 'GET' && url.pathname === '/api/auth/wechat/callback') { await wechatCallback(url, res, { db, config, fetchImpl, now }); return }
+      if (method === 'GET' && url.pathname === '/api/auth/wechat/callback') { await wechatCallback(url, req, res, { db, config, fetchImpl, now }); return }
       if (method === 'GET' && url.pathname === '/api/auth/me') { const session = getSession(req, db, time); return json(res, 200, { user: session?.user ?? null }) }
       if (method === 'POST' && url.pathname === '/api/auth/logout') {
         verifyOrigin(req, config); const session = getSession(req, db, time)
