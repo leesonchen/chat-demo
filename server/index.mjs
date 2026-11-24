@@ -4,6 +4,8 @@ import { createDatabase } from './database.mjs'
 import { createAppServer } from './app.mjs'
 import { parseEncryptionKey } from './security.mjs'
 
+process.umask(0o077)
+
 const root = path.dirname(fileURLToPath(import.meta.url))
 const appOrigin = new URL(process.env.APP_ORIGIN ?? 'http://localhost:8090').origin
 const dataDir = path.resolve(process.env.DATA_DIR ?? path.join(root, 'data'))
