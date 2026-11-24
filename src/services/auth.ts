@@ -113,7 +113,7 @@ export const beginWechatLogin = async () => {
   }
 }
 export const logout = async () => {
-  await request<void>('/api/auth/logout', { method: 'POST' })
+  await request<undefined>('/api/auth/logout', { method: 'POST' })
   useAuthStore.setState({ user: null, backupInfo: null, needsKeyUpload: false })
   // Keep the current local key for offline use; a later different-account login clears it.
 }
