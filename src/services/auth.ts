@@ -16,7 +16,7 @@ const writeKeyOwner = (userId: string | null) => {
   try { if (userId) localStorage.setItem(API_KEY_OWNER, userId); else localStorage.removeItem(API_KEY_OWNER) } catch { /* optional marker */ }
 }
 const request = async <T>(url: string, init: RequestInit = {}): Promise<T> => {
-  const response = await fetch(url, { ...init, credentials: 'same-origin', cache: 'no-store' })
+  const response = await fetch(url, { ...init, credentials: 'same-origin', cache: 'no-store', signal: init.signal ?? AbortSignal.timeout(10000) })
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as { error?: { code?: string } } | null
     throw new Error(body?.error?.code ?? `http_${response.status}`)
