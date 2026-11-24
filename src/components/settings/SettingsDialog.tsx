@@ -142,9 +142,13 @@ const CloudKeyPrompt = () => {
   const apiKey = useSettings((state) => state.apiKey)
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<Status>(null)
-  if (!user || !needsUpload || !apiKey) return null
+  if (!user || !needsUpload || !apiKey) {
+    return null
+  }
   const save = async () => {
-    if (busy) return
+    if (busy) {
+      return
+    }
     setBusy(true)
     setStatus(null)
     try {
@@ -165,10 +169,30 @@ const CloudKeyPrompt = () => {
       action={
         <>
           <Button variant="outlined" size="m" disabled={busy} onClick={dismissApiKeyUploadPrompt}>{t('skip')}</Button>
-          <Button variant="outlined" size="m" disabled={busy} onClick={() => void save()}>{t(busy ? 'apiKeyVerifying' : 'saveToCloud')}</Button>
+          <Button variant="outlined" size="m" disabled={busy} onClick={save}>{t(busy ? 'apiKeyVerifying' : 'saveToCloud')}</Button>
         </>
       }
-    />
+      />
+      {confirmCloudExport ? (
+        <Modal
+          title={t('cloudExportConfirmTitle')}
+          className={styles.importConfirm}
+          onClose={() => setConfirmCloudExport(false)}
+          footer={
+            <>
+              <Button variant="outlined" size="m" autoFocus onClick={() => setConfirmCloudExport(false)}>
+                {t('cancel')}
+              </Button>
+              <Button variant="dangerOutlined" size="m" onClick={confirmExportToCloud}>
+                {t('cloudExport')}
+              </Button>
+            </>
+          }
+        >
+          <div className={styles.importConfirmText}>{t('cloudExportConfirmDescription')}</div>
+        </Modal>
+      ) : null}
+    </>
   )
 }
 
@@ -484,7 +508,9 @@ const useHistoryImport = () => {
   const importing = useRef(false)
 
   const runImport = async (task: () => Promise<number>, failureKey: TranslationKey) => {
-    if (importing.current) return
+    if (importing.current) {
+      return
+    }
     importing.current = true
     setFile(null)
     setBusy(true)
@@ -504,7 +530,9 @@ const useHistoryImport = () => {
     }
   }
   const confirm = () => {
-    if (!file) return Promise.resolve()
+    if (!file) {
+      return Promise.resolve()
+    }
     const selected = file
     return runImport(() => importHistory(selected), 'historyImportFailed')
   }
@@ -525,6 +553,7 @@ const ImportHistory = ({
   const inputRef = useRef<HTMLInputElement>(null)
   const user = useAuthStore((state) => state.user)
   const backupInfo = useAuthStore((state) => state.backupInfo)
+  const [confirmCloudImport, setConfirmCloudImport] = useState(false)
   const cloudDescription = backupInfo
     ? backupInfo.exists
       ? t('cloudBackupAvailable', { date: new Date(backupInfo.updatedAt ?? '').toLocaleString() })
@@ -532,12 +561,19 @@ const ImportHistory = ({
     : t('historyImportDescription')
 
   const onCloudImport = () => {
-    if (!user || historyImport.busy || !window.confirm(t('cloudImportConfirmDescription'))) return
-    void historyImport.importFromServer().finally(() => refreshCloudBackupInfo())
+    if (!user || historyImport.busy) {
+      return
+    }
+    setConfirmCloudImport(true)
+  }
+  const confirmImportFromCloud = () => {
+    setConfirmCloudImport(false)
+    historyImport.importFromServer().finally(() => refreshCloudBackupInfo())
   }
 
   return (
-    <SettingCell
+    <>
+      <SettingCell
       label={t('historyImport')}
       description={cloudDescription}
       status={historyImport.status}
@@ -576,7 +612,27 @@ const ImportHistory = ({
           />
         </>
       }
-    />
+      />
+      {confirmCloudImport ? (
+        <Modal
+          title={t('cloudImportConfirmTitle')}
+          className={styles.importConfirm}
+          onClose={() => setConfirmCloudImport(false)}
+          footer={
+            <>
+              <Button variant="outlined" size="m" autoFocus onClick={() => setConfirmCloudImport(false)}>
+                {t('cancel')}
+              </Button>
+              <Button variant="dangerOutlined" size="m" onClick={confirmImportFromCloud}>
+                {t('cloudImport')}
+              </Button>
+            </>
+          }
+        >
+          <div className={styles.importConfirmText}>{t('cloudImportConfirmDescription')}</div>
+        </Modal>
+      ) : null}
+    </>
   )
 }
 
@@ -588,6 +644,7 @@ const ExportHistory = ({ disabled }: { disabled: boolean }) => {
   const backupInfo = useAuthStore((state) => state.backupInfo)
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<Status>(null)
+  const [confirmCloudExport, setConfirmCloudExport] = useState(false)
 
   const onExport = async () => {
     setBusy(true)
@@ -606,8 +663,14 @@ const ExportHistory = ({ disabled }: { disabled: boolean }) => {
       setBusy(false)
     }
   }
-  const onCloudExport = async () => {
-    if (!user || busy || !window.confirm(t('cloudExportConfirmDescription'))) return
+  const onCloudExport = () => {
+    if (!user || busy) {
+      return
+    }
+    setConfirmCloudExport(true)
+  }
+  const confirmExportToCloud = async () => {
+    setConfirmCloudExport(false)
     setBusy(true)
     setStatus(null)
     try {
@@ -617,7 +680,7 @@ const ExportHistory = ({ disabled }: { disabled: boolean }) => {
       setStatus(errorStatus('cloudExportFailed', error))
     } finally {
       setBusy(false)
-      void refreshCloudBackupInfo()
+      await refreshCloudBackupInfo()
     }
   }
   const description = backupInfo?.exists
