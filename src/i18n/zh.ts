@@ -124,7 +124,6 @@ export const zh = {
   cloudExportSuccess: '聊天记录已备份到服务器',
   cloudImportFailed: '从服务器导入失败：{message}',
   cloudExportFailed: '导出到服务器失败：{message}',
-  apiKeyCloudSaveFailed: 'API Key 已保存在本机，但保存到云端失败，请重试',
   apiKeyStart: '输入 API Key 开始使用',
   apiKeyEdit: '修改 API Key',
   apiKeyPlaceholder: '请输入 API Key',
