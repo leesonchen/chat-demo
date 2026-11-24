@@ -117,8 +117,9 @@ const writeBackup = async (req, directory, userId) => {
 const serializeBackup = (userId, task) => {
   const previous = backupQueues.get(userId) ?? Promise.resolve()
   const next = previous.then(task, task)
-  backupQueues.set(userId, next.catch(() => {}))
-  return next.finally(() => { if (backupQueues.get(userId) === next) backupQueues.delete(userId) })
+  const tail = next.catch(() => {})
+  backupQueues.set(userId, tail)
+  return next.finally(() => { if (backupQueues.get(userId) === tail) backupQueues.delete(userId) })
 }
 
 export const createAppServer = ({ db, config, fetchImpl = fetch, now = Date.now }) => {
