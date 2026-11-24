@@ -147,7 +147,7 @@ test('WeChat Official Account QR login completes through a one-time browser poll
   t.after(app.close)
 
   const origin = 'http://localhost:8090'
-  const start = await fetch(`${app.baseUrl}/api/auth/wechat/start`)
+  const start = await fetch(`${app.baseUrl}/api/auth/wechat/start`, { method: 'POST', headers: { origin: 'http://localhost:8090' } })
   assert.equal(start.status, 200)
   const challenge = await start.json()
   assert.ok(challenge.ticket)
