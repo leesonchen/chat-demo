@@ -69,7 +69,7 @@ export const App = () => {
   useEffect(closeMobileSider, [activeId, isMobile])
 
   useEffect(() => {
-    void initChat()
+    initChat()
     // Restore the signed-in account and its API Key before prompting for a missing key.
     initAuth().finally(() => ensureApiKey())
   }, [])
@@ -109,7 +109,7 @@ export const App = () => {
                       size="m"
                       onClick={() => {
                         if (!ready) {
-                          void initChat()
+                          initChat()
                         } else if (activeId !== null) {
                           selectSession(activeId)
                         }
