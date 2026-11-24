@@ -119,6 +119,8 @@ export const en = {
   apiKeyCloudSaveFailed: 'API Key is saved locally, but cloud save failed. Please retry.',
   saveToCloud: 'Save to server',
   skip: 'Not now',
+  cloudImportConfirmTitle: 'Import chat history from server',
+  cloudExportConfirmTitle: 'Export chat history to server',
   cloudImport: 'Import from server',
   cloudExport: 'Export to server',
   cloudBackupAvailable: 'Cloud backup: {date}',
