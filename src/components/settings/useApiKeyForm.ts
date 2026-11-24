@@ -3,6 +3,7 @@ import { ApiError, verifyApiKey } from '../../services/api/client.js'
 import { classifyApiError } from '../../services/api/errors.js'
 import { setApiKey } from '../../services/settings.js'
 import { useTranslate } from '../../i18n/index.js'
+import { saveApiKeyToCloud } from '../../services/auth.js'
 
 /** 输入 API Key 后先用 GET /models 校验，通过才保存 */
 export const useApiKeyForm = (onSaved?: () => void) => {
@@ -14,7 +15,9 @@ export const useApiKeyForm = (onSaved?: () => void) => {
   const error =
     failure === null
       ? null
-      : classifyApiError(cause) === 'unauthorized'
+      : cause instanceof Error && cause.message === 'cloud_save_failed'
+        ? t('apiKeyCloudSaveFailed')
+        : classifyApiError(cause) === 'unauthorized'
         ? t('apiKeyInvalid')
         : classifyApiError(cause) === 'network'
           ? t('commonNetworkErrorToast')
@@ -37,6 +40,13 @@ export const useApiKeyForm = (onSaved?: () => void) => {
     try {
       await verifyApiKey(apiKey)
       setApiKey(apiKey)
+      try {
+        await saveApiKeyToCloud(apiKey)
+      } catch {
+        setValue('')
+        setFailure({ cause: new Error('cloud_save_failed') })
+        return
+      }
       setValue('')
       onSaved?.()
     } catch (e) {
