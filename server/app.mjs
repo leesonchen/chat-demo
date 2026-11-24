@@ -23,11 +23,18 @@ const json = (res, status, value, headers = {}) => {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body), 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...headers })
   res.end(body)
 }
-const html = (res, status, origin, success, headers = {}) => {
-  const message = success ? 'Login completed. You can close this window.' : 'WeChat login failed. Please close this window and try again.'
-  const type = success ? 'chat-demo-auth-complete' : 'chat-demo-auth-failed'
-  const body = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Chat Demo Login</title></head><body><p>${message}</p><script>if(window.opener)window.opener.postMessage({type:${JSON.stringify(type)}},${JSON.stringify(origin)});window.close();</script></body></html>`
-  res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'", ...headers })
+const html = (res, status, success) => {
+  const message = success
+    ? '微信身份验证成功，请返回电脑端完成登录。'
+    : '微信登录验证失败，请返回电脑端重新扫码。'
+  const body = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Chat Demo 微信登录</title></head><body><main style="font-family:system-ui,sans-serif;max-width:420px;margin:18vh auto;padding:24px;text-align:center"><h2>${success ? '验证成功' : '验证失败'}</h2><p>${message}</p></main></body></html>`
+  res.writeHead(status, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'Referrer-Policy': 'no-referrer',
+    'X-Content-Type-Options': 'nosniff',
+    'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+  })
   res.end(body)
 }
 const cookies = (header = '') => Object.fromEntries(header.split(';').map((x) => x.trim()).filter(Boolean).map((x) => {
@@ -62,43 +69,80 @@ const wechatJson = async (fetchImpl, url) => {
   if (body.errcode) throw new Error('WeChat authorization rejected')
   return body
 }
-const findOrCreateUser = (db, profile, now) => {
+const findOrCreateWechatUser = (db, openid, unionid, now) => {
   db.exec('BEGIN IMMEDIATE')
   try {
-    const existing = db.prepare("SELECT user_id FROM oauth_identities WHERE provider = 'wechat' AND openid = ?").get(profile.openid)
-    const userId = existing?.user_id ?? randomUUID()
-    if (!existing) {
-      db.prepare('INSERT INTO users (id, nickname, avatar_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run(userId, String(profile.nickname ?? '').slice(0, 120), String(profile.headimgurl ?? '').slice(0, 2048), now, now)
-      db.prepare("INSERT INTO oauth_identities (id, user_id, provider, openid, unionid, created_at, updated_at) VALUES (?, ?, 'wechat', ?, ?, ?, ?)").run(randomUUID(), userId, profile.openid, typeof profile.unionid === 'string' ? profile.unionid : null, now, now)
+    const identity = db.prepare("SELECT user_id FROM oauth_identities WHERE provider = 'wechat' AND openid = ?").get(openid)
+    const userId = identity?.user_id ?? randomUUID()
+    if (!identity) {
+      db.prepare("INSERT INTO users (id, nickname, avatar_url, created_at, updated_at) VALUES (?, '微信用户', '', ?, ?)").run(userId, now, now)
+      db.prepare("INSERT INTO oauth_identities (id, user_id, provider, openid, unionid, created_at, updated_at) VALUES (?, ?, 'wechat', ?, ?, ?, ?)").run(randomUUID(), userId, openid, typeof unionid === 'string' ? unionid : null, now, now)
     } else {
-      db.prepare('UPDATE users SET nickname = ?, avatar_url = ?, updated_at = ? WHERE id = ?').run(String(profile.nickname ?? '').slice(0, 120), String(profile.headimgurl ?? '').slice(0, 2048), now, userId)
-      db.prepare("UPDATE oauth_identities SET unionid = COALESCE(?, unionid), updated_at = ? WHERE provider = 'wechat' AND openid = ?").run(typeof profile.unionid === 'string' ? profile.unionid : null, now, profile.openid)
+      db.prepare("UPDATE oauth_identities SET unionid = COALESCE(?, unionid), updated_at = ? WHERE provider = 'wechat' AND openid = ?").run(typeof unionid === 'string' ? unionid : null, now, openid)
+      db.prepare("UPDATE users SET updated_at = ? WHERE id = ?").run(now, userId)
     }
     db.exec('COMMIT')
     return db.prepare('SELECT id, nickname, avatar_url FROM users WHERE id = ?').get(userId)
-  } catch (error) { db.exec('ROLLBACK'); throw error }
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  }
 }
-const wechatCallback = async (url, req, res, { db, config, fetchImpl, now }) => {
-  const state = url.searchParams.get('state'), code = url.searchParams.get('code')
-  if (!state || !code || cookies(req.headers.cookie)[OAUTH_STATE_COOKIE] !== state || !config.wechatAppId || !config.wechatAppSecret) { html(res, 400, config.appOrigin, false, { 'Set-Cookie': clearOauthStateCookie(config.secureCookies) }); return }
+const wechatCallback = async (url, res, { db, config, fetchImpl, now }) => {
+  const state = url.searchParams.get('state')
+  const code = url.searchParams.get('code')
+  if (!state || !code || state.length > 256 || !config.wechatAppId || !config.wechatAppSecret) {
+    html(res, 400, false)
+    return
+  }
+
   const stateHash = sha256(state)
-  const valid = db.prepare('SELECT state_hash FROM oauth_states WHERE state_hash = ? AND expires_at > ?').get(stateHash, now())
-  db.prepare('DELETE FROM oauth_states WHERE state_hash = ?').run(stateHash)
-  if (!valid) { html(res, 400, config.appOrigin, false, { 'Set-Cookie': clearOauthStateCookie(config.secureCookies) }); return }
+  const attempt = db.prepare(`
+    SELECT ticket_hash, status
+    FROM wechat_login_attempts
+    WHERE state_hash = ? AND expires_at > ?
+  `).get(stateHash, now())
+  if (!attempt || attempt.status !== 'pending') {
+    html(res, 400, false)
+    return
+  }
+  const claimed = db.prepare(`
+    UPDATE wechat_login_attempts
+    SET status = 'processing'
+    WHERE state_hash = ? AND status = 'pending' AND expires_at > ?
+  `).run(stateHash, now())
+  if (claimed.changes !== 1) {
+    html(res, 409, false)
+    return
+  }
+
   try {
     const tokenUrl = new URL('https://api.weixin.qq.com/sns/oauth2/access_token')
-    tokenUrl.search = new URLSearchParams({ appid: config.wechatAppId, secret: config.wechatAppSecret, code, grant_type: 'authorization_code' }).toString()
+    tokenUrl.search = new URLSearchParams({
+      appid: config.wechatAppId,
+      secret: config.wechatAppSecret,
+      code,
+      grant_type: 'authorization_code',
+    }).toString()
     const token = await wechatJson(fetchImpl, tokenUrl)
-    if (!token.openid || !token.access_token) throw new Error('Incomplete WeChat token')
-    const profileUrl = new URL('https://api.weixin.qq.com/sns/userinfo')
-    profileUrl.search = new URLSearchParams({ access_token: token.access_token, openid: token.openid, lang: 'zh_CN' }).toString()
-    const profile = await wechatJson(fetchImpl, profileUrl)
-    if (profile.openid !== token.openid) throw new Error('WeChat identity mismatch')
-    const user = findOrCreateUser(db, profile, now())
-    const sessionToken = randomBytes(32).toString('base64url')
-    db.prepare('INSERT INTO sessions (token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)').run(sha256(sessionToken), user.id, now() + SESSION_TTL, now())
-    html(res, 200, config.appOrigin, true, { 'Set-Cookie': [setCookie(sessionToken, config.secureCookies), clearOauthStateCookie(config.secureCookies)] })
-  } catch { html(res, 502, config.appOrigin, false, { 'Set-Cookie': clearOauthStateCookie(config.secureCookies) }) }
+    if (!token.openid || !token.access_token) {
+      throw new Error('Incomplete WeChat token')
+    }
+
+    const user = findOrCreateWechatUser(db, token.openid, token.unionid, now())
+    const completed = db.prepare(`
+      UPDATE wechat_login_attempts
+      SET status = 'authorized', user_id = ?
+      WHERE state_hash = ? AND status = 'processing' AND expires_at > ?
+    `).run(user.id, stateHash, now())
+    if (completed.changes !== 1) {
+      throw new Error('WeChat login transaction expired')
+    }
+    html(res, 200, true)
+  } catch {
+    db.prepare("UPDATE wechat_login_attempts SET status = 'failed' WHERE state_hash = ? AND status = 'processing'").run(stateHash)
+    html(res, 502, false)
+  }
 }
 const writeBackup = async (req, directory, userId) => {
   await mkdir(directory, { recursive: true, mode: 0o700 })
@@ -133,17 +177,93 @@ export const createAppServer = ({ db, config, fetchImpl = fetch, now = Date.now 
       const url = new URL(req.url ?? '/', config.appOrigin), method = req.method ?? 'GET'
       if (method === 'GET' && url.pathname === '/api/health') return json(res, 200, { ok: true })
       if (method === 'GET' && url.pathname === '/api/auth/wechat/start') {
-        if (!config.wechatAppId || !config.wechatRedirectUri) throw new HttpError(503, 'wechat_login_not_configured')
+        if (!config.wechatAppId || !config.wechatRedirectUri) {
+          throw new HttpError(503, 'wechat_login_not_configured')
+        }
+        const ticket = randomBytes(32).toString('base64url')
+        const pollSecret = randomBytes(32).toString('base64url')
         const state = randomBytes(24).toString('hex')
-        db.prepare('DELETE FROM oauth_states WHERE expires_at <= ?').run(time)
-        db.prepare('INSERT INTO oauth_states (state_hash, expires_at, created_at) VALUES (?, ?, ?)').run(sha256(state), time + STATE_TTL, time)
-        const authorize = new URL('https://open.weixin.qq.com/connect/qrconnect')
-        authorize.search = new URLSearchParams({ appid: config.wechatAppId, redirect_uri: config.wechatRedirectUri, response_type: 'code', scope: 'snsapi_login', state }).toString()
+        db.prepare('DELETE FROM wechat_login_attempts WHERE expires_at <= ?').run(time)
+        db.prepare(`
+          INSERT INTO wechat_login_attempts
+            (ticket_hash, poll_secret_hash, state_hash, status, expires_at, created_at)
+          VALUES (?, ?, ?, 'pending', ?, ?)
+        `).run(sha256(ticket), sha256(pollSecret), sha256(state), time + STATE_TTL, time)
+        const authorize = new URL('https://open.weixin.qq.com/connect/oauth2/authorize')
+        authorize.search = new URLSearchParams({
+          appid: config.wechatAppId,
+          redirect_uri: config.wechatRedirectUri,
+          response_type: 'code',
+          scope: 'snsapi_base',
+          state,
+        }).toString()
         authorize.hash = 'wechat_redirect'
-        return json(res, 200, { authorizeUrl: authorize.toString() }, { 'Set-Cookie': oauthStateCookie(state, config.secureCookies) })
+        return json(res, 200, {
+          ticket,
+          pollSecret,
+          authorizeUrl: authorize.toString(),
+          expiresIn: STATE_TTL / 1000,
+        })
       }
-      if (method === 'GET' && url.pathname === '/api/auth/wechat/callback') { await wechatCallback(url, req, res, { db, config, fetchImpl, now }); return }
-      if (method === 'GET' && url.pathname === '/api/auth/me') { const session = getSession(req, db, time); return json(res, 200, { user: session?.user ?? null }) }
+      if (method === 'GET' && url.pathname === '/api/auth/wechat/callback') {
+        await wechatCallback(url, res, { db, config, fetchImpl, now })
+        return
+      }
+      if (method === 'POST' && url.pathname === '/api/auth/wechat/poll') {
+        verifyOrigin(req, config)
+        const body = await readJson(req)
+        const ticket = typeof body.ticket === 'string' ? body.ticket : ''
+        const pollSecret = typeof body.pollSecret === 'string' ? body.pollSecret : ''
+        if (!ticket || !pollSecret || ticket.length > 128 || pollSecret.length > 128) {
+          throw new HttpError(400, 'invalid_login_ticket')
+        }
+        const ticketHash = sha256(ticket)
+        const attempt = db.prepare(`
+          SELECT poll_secret_hash, status, user_id, expires_at
+          FROM wechat_login_attempts WHERE ticket_hash = ?
+        `).get(ticketHash)
+        if (!attempt || attempt.poll_secret_hash !== sha256(pollSecret)) {
+          throw new HttpError(404, 'login_ticket_not_found')
+        }
+        if (attempt.expires_at <= time) {
+          db.prepare('DELETE FROM wechat_login_attempts WHERE ticket_hash = ?').run(ticketHash)
+          throw new HttpError(410, 'login_ticket_expired')
+        }
+        if (attempt.status === 'pending' || attempt.status === 'processing') {
+          return json(res, 200, { status: 'pending' })
+        }
+        if (attempt.status === 'failed') {
+          db.prepare('DELETE FROM wechat_login_attempts WHERE ticket_hash = ?').run(ticketHash)
+          throw new HttpError(400, 'wechat_authorization_failed')
+        }
+        if (attempt.status !== 'authorized' || !attempt.user_id) {
+          throw new HttpError(409, 'login_ticket_unavailable')
+        }
+
+        const sessionToken = randomBytes(32).toString('base64url')
+        db.exec('BEGIN IMMEDIATE')
+        try {
+          const current = db.prepare(`
+            SELECT poll_secret_hash, status, user_id, expires_at
+            FROM wechat_login_attempts WHERE ticket_hash = ?
+          `).get(ticketHash)
+          if (!current || current.poll_secret_hash !== sha256(pollSecret) || current.status !== 'authorized' || current.expires_at <= now()) {
+            throw new HttpError(409, 'login_ticket_unavailable')
+          }
+          db.prepare('INSERT INTO sessions (token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)')
+            .run(sha256(sessionToken), current.user_id, now() + SESSION_TTL, now())
+          db.prepare('DELETE FROM wechat_login_attempts WHERE ticket_hash = ?').run(ticketHash)
+          db.exec('COMMIT')
+        } catch (error) {
+          db.exec('ROLLBACK')
+          throw error
+        }
+        const user = db.prepare('SELECT id, nickname, avatar_url FROM users WHERE id = ?').get(attempt.user_id)
+        return json(res, 200, {
+          status: 'authenticated',
+          user: { id: user.id, nickname: user.nickname, avatarUrl: user.avatar_url },
+        }, { 'Set-Cookie': setCookie(sessionToken, config.secureCookies) })
+      }      if (method === 'GET' && url.pathname === '/api/auth/me') { const session = getSession(req, db, time); return json(res, 200, { user: session?.user ?? null }) }
       if (method === 'POST' && url.pathname === '/api/auth/logout') {
         verifyOrigin(req, config); const session = getSession(req, db, time)
         if (session) db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(session.tokenHash)
