@@ -1,4 +1,4 @@
-import { mkdirSync } from 'node:fs'
+import { chmodSync, mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
@@ -65,10 +65,11 @@ export const migrateDatabase = (db) => {
 
 export const createDatabase = (filename) => {
   if (filename !== ':memory:') {
-    mkdirSync(path.dirname(filename), { recursive: true })
+    mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 })
   }
   const db = new DatabaseSync(filename)
   if (filename !== ':memory:') {
+    chmodSync(filename, 0o600)
     db.exec('PRAGMA journal_mode = WAL;')
   }
   migrateDatabase(db)
