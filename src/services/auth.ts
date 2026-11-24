@@ -79,7 +79,7 @@ export const initAuth = async () => {
 export const beginWechatLogin = async (): Promise<WechatLoginChallenge> => {
   useAuthStore.setState({ loginBusy: true })
   try {
-    return await request<WechatLoginChallenge>('/api/auth/wechat/start')
+    return await request<WechatLoginChallenge>('/api/auth/wechat/start', { method: 'POST' })
   } finally {
     useAuthStore.setState({ loginBusy: false })
   }
