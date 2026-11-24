@@ -150,6 +150,7 @@ const CloudKeyPrompt = () => {
     try {
       await saveCurrentApiKeyToCloud()
       setStatus({ key: 'apiKeyCloudSaved' })
+      showToast({ key: 'apiKeyCloudSaved' })
     } catch {
       setStatus({ key: 'apiKeyCloudSaveFailed', error: true })
     } finally {
