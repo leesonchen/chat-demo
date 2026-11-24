@@ -15,9 +15,10 @@ export const parseEncryptionKey = (value) => {
   return key
 }
 
-export const encryptSecret = (value, key) => {
+export const encryptSecret = (value, key, associatedData = '') => {
   const iv = randomBytes(12)
   const cipher = createCipheriv('aes-256-gcm', key, iv)
+  cipher.setAAD(Buffer.from(associatedData, 'utf8'))
   const ciphertext = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()])
   return {
     ciphertext: ciphertext.toString('base64'),
@@ -26,8 +27,9 @@ export const encryptSecret = (value, key) => {
   }
 }
 
-export const decryptSecret = ({ ciphertext, iv, tag }, key) => {
+export const decryptSecret = ({ ciphertext, iv, tag }, key, associatedData = '') => {
   const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(iv, 'base64'))
+  decipher.setAAD(Buffer.from(associatedData, 'utf8'))
   decipher.setAuthTag(Buffer.from(tag, 'base64'))
   return Buffer.concat([
     decipher.update(Buffer.from(ciphertext, 'base64')),
