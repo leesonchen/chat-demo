@@ -31,24 +31,26 @@ export const useAuthStore = create<AuthState>(() => ({
 }))
 
 const loadAccountData = async (user: AuthUser) => {
+  const owner = readKeyOwner()
+  if (owner && owner !== user.id) {
+    // Clear another account's locally cached key before any network request can fail.
+    setApiKey(null)
+    writeKeyOwner(null)
+  }
+  const localKey = useSettings.getState().apiKey
+  useAuthStore.setState({ needsKeyUpload: Boolean(localKey) })
   try {
     const { apiKey } = await request<{ apiKey: string | null }>('/api/account/api-key')
-    const localKey = useSettings.getState().apiKey
-    const owner = readKeyOwner()
     if (apiKey) {
       setApiKey(apiKey)
       writeKeyOwner(user.id)
-      useAuthStore.setState({ needsKeyUpload: false })
-    } else if (owner && owner !== user.id) {
-      setApiKey(null)
-      writeKeyOwner(null)
       useAuthStore.setState({ needsKeyUpload: false })
     } else {
       // Legacy local keys have no owner marker: never upload them without an explicit user action.
       useAuthStore.setState({ needsKeyUpload: Boolean(localKey) })
     }
   } catch {
-    // A temporary key endpoint failure must not invalidate the authenticated session.
+    // Keep account isolation even when the optional key endpoint is temporarily unavailable.
   }
   await refreshCloudBackupInfo()
 }
