@@ -4,6 +4,7 @@ import { classifyApiError } from '../../services/api/errors.js'
 import { setApiKey } from '../../services/settings.js'
 import { useTranslate } from '../../i18n/index.js'
 import { saveApiKeyToCloud } from '../../services/auth.js'
+import { showToast } from '../base/toastState.js'
 
 /** 输入 API Key 后先用 GET /models 校验，通过才保存 */
 export const useApiKeyForm = (onSaved?: () => void) => {
@@ -45,6 +46,8 @@ export const useApiKeyForm = (onSaved?: () => void) => {
       } catch {
         setValue('')
         setFailure({ cause: new Error('cloud_save_failed') })
+        showToast({ key: 'apiKeyCloudSaveFailed', type: 'error' })
+        onSaved?.()
         return
       }
       setValue('')
