@@ -122,44 +122,95 @@ test('WeChat login start refuses to run until credentials are configured', async
   assert.equal(response.status, 503)
 })
 
-test('WeChat OAuth requires a browser-bound one-time state and creates an identity', async (t) => {
+test('WeChat Official Account QR login completes through a one-time browser polling ticket', async (t) => {
+  let wechatCalls = 0
   const app = await makeServer({
-    wechatAppId: 'test-app',
+    wechatAppId: 'wx-test-app',
     wechatAppSecret: 'test-secret',
     wechatRedirectUri: 'http://localhost:8090/api/auth/wechat/callback',
     fetchImpl: async (input) => {
+      wechatCalls += 1
       const url = new URL(input)
-      if (url.pathname.endsWith('/access_token')) {
-        return { ok: true, json: async () => ({ access_token: 'wechat-access-token', openid: 'wechat-openid' }) }
+      assert.equal(url.pathname, '/sns/oauth2/access_token')
+      assert.equal(url.searchParams.get('appid'), 'wx-test-app')
+      assert.equal(url.searchParams.get('secret'), 'test-secret')
+      return {
+        ok: true,
+        json: async () => ({
+          access_token: 'wechat-web-access-token',
+          openid: 'wechat-openid',
+          unionid: 'wechat-unionid',
+        }),
       }
-      return { ok: true, json: async () => ({ openid: 'wechat-openid', unionid: 'wechat-unionid', nickname: 'WeChat User', headimgurl: 'https://example.com/avatar.png' }) }
     },
   })
   t.after(app.close)
 
+  const origin = 'http://localhost:8090'
   const start = await fetch(`${app.baseUrl}/api/auth/wechat/start`)
   assert.equal(start.status, 200)
-  const { authorizeUrl } = await start.json()
-  const authorize = new URL(authorizeUrl)
+  const challenge = await start.json()
+  assert.ok(challenge.ticket)
+  assert.ok(challenge.pollSecret)
+  assert.equal(challenge.expiresIn, 600)
+
+  const authorize = new URL(challenge.authorizeUrl)
   const state = authorize.searchParams.get('state')
-  assert.equal(authorize.searchParams.get('scope'), 'snsapi_login')
-  const stateCookie = start.headers.get('set-cookie')
-  assert.ok(stateCookie?.includes(`chat_demo_oauth_state=${state}`))
+  assert.equal(authorize.origin, 'https://open.weixin.qq.com')
+  assert.equal(authorize.pathname, '/connect/oauth2/authorize')
+  assert.equal(authorize.searchParams.get('appid'), 'wx-test-app')
+  assert.equal(authorize.searchParams.get('scope'), 'snsapi_base')
+  assert.equal(authorize.searchParams.get('response_type'), 'code')
+  assert.equal(authorize.searchParams.get('redirect_uri'), 'http://localhost:8090/api/auth/wechat/callback')
+  assert.equal(authorize.hash, '#wechat_redirect')
 
-  const forged = await fetch(`${app.baseUrl}/api/auth/wechat/callback?code=code&state=${state}`)
-  assert.equal(forged.status, 400)
-
-  const callback = await fetch(`${app.baseUrl}/api/auth/wechat/callback?code=code&state=${state}`, {
-    headers: { cookie: `chat_demo_oauth_state=${state}` },
+  const pending = await fetch(`${app.baseUrl}/api/auth/wechat/poll`, {
+    method: 'POST',
+    headers: { origin, 'content-type': 'application/json' },
+    body: JSON.stringify({ ticket: challenge.ticket, pollSecret: challenge.pollSecret }),
   })
+  assert.deepEqual(await pending.json(), { status: 'pending' })
+
+  const forgedPoll = await fetch(`${app.baseUrl}/api/auth/wechat/poll`, {
+    method: 'POST',
+    headers: { origin, 'content-type': 'application/json' },
+    body: JSON.stringify({ ticket: challenge.ticket, pollSecret: 'wrong-secret' }),
+  })
+  assert.equal(forgedPoll.status, 404)
+
+  const callback = await fetch(`${app.baseUrl}/api/auth/wechat/callback?code=single-use-code&state=${state}`)
   assert.equal(callback.status, 200)
-  assert.ok(callback.headers.get('set-cookie')?.includes('chat_demo_session='))
+  assert.match(await callback.text(), /微信身份验证成功/)
+  assert.equal(wechatCalls, 1)
+
   const identity = app.db.prepare("SELECT user_id, unionid FROM oauth_identities WHERE provider = 'wechat' AND openid = ?").get('wechat-openid')
   assert.ok(identity)
   assert.equal(identity.unionid, 'wechat-unionid')
 
-  const replay = await fetch(`${app.baseUrl}/api/auth/wechat/callback?code=code&state=${state}`, {
-    headers: { cookie: `chat_demo_oauth_state=${state}` },
+  const poll = await fetch(`${app.baseUrl}/api/auth/wechat/poll`, {
+    method: 'POST',
+    headers: { origin, 'content-type': 'application/json' },
+    body: JSON.stringify({ ticket: challenge.ticket, pollSecret: challenge.pollSecret }),
   })
+  assert.equal(poll.status, 200)
+  const result = await poll.json()
+  assert.equal(result.status, 'authenticated')
+  assert.equal(result.user.id, identity.user_id)
+  assert.equal(result.user.nickname, '微信用户')
+  assert.ok(poll.headers.get('set-cookie')?.includes('chat_demo_session='))
+
+  const me = await fetch(`${app.baseUrl}/api/auth/me`, {
+    headers: { cookie: poll.headers.get('set-cookie').split(';')[0] },
+  })
+  assert.equal((await me.json()).user.id, identity.user_id)
+
+  const replay = await fetch(`${app.baseUrl}/api/auth/wechat/callback?code=single-use-code&state=${state}`)
   assert.equal(replay.status, 400)
+
+  const replayPoll = await fetch(`${app.baseUrl}/api/auth/wechat/poll`, {
+    method: 'POST',
+    headers: { origin, 'content-type': 'application/json' },
+    body: JSON.stringify({ ticket: challenge.ticket, pollSecret: challenge.pollSecret }),
+  })
+  assert.equal(replayPoll.status, 404)
 })
