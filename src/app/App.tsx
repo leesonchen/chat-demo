@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { useTranslate } from '../i18n/index.js'
 import { useSettings } from '../services/settings.js'
+import { initAuth } from '../services/auth.js'
 import { useIsMobile, useMobileViewport, usePreventPageScroll } from './viewport.js'
 import {
   bindChatPersistence,
@@ -68,9 +69,9 @@ export const App = () => {
   useEffect(closeMobileSider, [activeId, isMobile])
 
   useEffect(() => {
-    void initChat()
-    // 首次打开先在设置里输入 API Key
-    ensureApiKey()
+    initChat()
+    // Restore the signed-in account and its API Key before prompting for a missing key.
+    initAuth().finally(() => ensureApiKey())
   }, [])
 
   return (
@@ -108,7 +109,7 @@ export const App = () => {
                       size="m"
                       onClick={() => {
                         if (!ready) {
-                          void initChat()
+                          initChat()
                         } else if (activeId !== null) {
                           selectSession(activeId)
                         }

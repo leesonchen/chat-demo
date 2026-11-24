@@ -10,7 +10,9 @@
     "build": "rm -rf dist && NODE_ENV=production rspack build -c rspack.config.ts",
     "type": "tsc -p tsconfig.json",
     "lint": "oxlint src rspack.config.ts",
-    "format": "oxfmt --write ."
+    "format": "oxfmt --write .",
+    "server": "node --experimental-sqlite --env-file-if-exists=server/.env server/index.mjs",
+    "server:test": "node --experimental-sqlite --test server/test/*.test.mjs"
   },
   "dependencies": {
     "@types/katex": "^0.16.5",
@@ -32,7 +34,8 @@
     "prismjs": "1.30.0",
     "react": "18.3.1",
     "react-dom": "18.3.1",
-    "zustand": "4.4.7"
+    "zustand": "4.4.7",
+    "qrcode-generator": "2.0.4"
   },
   "devDependencies": {
     "@rspack/cli": "2.0.2",

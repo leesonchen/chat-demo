@@ -16,6 +16,7 @@ import {
   exportHistory,
   importHistory,
 } from '../../services/chat/backup.js'
+import type { ImportProgressCallback } from '../../services/chat/history/importArchive.js'
 import { useIsMobile } from '../../app/viewport.js'
 import { useChatStore } from '../../services/chat/store.js'
 import { regionCodes, getRegionName, provinces } from '../../services/location.js'
@@ -33,6 +34,8 @@ import { Button } from '../base/Button.js'
 import { Modal } from '../base/Modal.js'
 import { Select } from '../base/Select.js'
 import { showToast } from '../base/toastState.js'
+import { dismissApiKeyUploadPrompt, refreshCloudBackupInfo, saveCurrentApiKeyToCloud, useAuthStore } from '../../services/auth.js'
+import { exportHistoryToServer, importHistoryFromServer } from '../../services/cloudBackup.js'
 import { ApiKeyConfirm, ApiKeyField, useApiKeyEditor } from './ApiKeyField.js'
 import { closeSettings, useSettingsDialog, type SettingsSection } from './settingsDialogState.js'
 import styles from './Settings.module.css'
@@ -110,6 +113,7 @@ const SettingsContent = ({
           ) : (
             <>
               <ApiKeyField editor={apiKeyEditor} />
+              <CloudKeyPrompt />
               <ImportHistory historyImport={historyImport} disabled={historyBusy} />
               <ExportHistory disabled={historyBusy} />
               <SettingCell
@@ -138,6 +142,51 @@ const SettingsContent = ({
   )
 }
 
+const CloudKeyPrompt = () => {
+  const t = useTranslate()
+  const user = useAuthStore((state) => state.user)
+  const needsUpload = useAuthStore((state) => state.needsKeyUpload)
+  const apiKey = useSettings((state) => state.apiKey)
+  const [busy, setBusy] = useState(false)
+  const [status, setStatus] = useState<Status>(null)
+  if (!user || !needsUpload || !apiKey) {
+    return null
+  }
+  const save = async () => {
+    if (busy) {
+      return
+    }
+    setBusy(true)
+    setStatus(null)
+    try {
+      await saveCurrentApiKeyToCloud()
+      setStatus({ key: 'apiKeyCloudSaved' })
+      showToast({ key: 'apiKeyCloudSaved' })
+    } catch {
+      setStatus({ key: 'apiKeyCloudSaveFailed', error: true })
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <SettingCell
+      label={t('apiKeyCloudPrompt')}
+      description={t('apiKeyCloudPromptDescription')}
+      status={status}
+      action={
+        <>
+          <Button variant="outlined" size="m" disabled={busy} onClick={dismissApiKeyUploadPrompt}>
+            {t('skip')}
+          </Button>
+          <Button variant="outlined" size="m" disabled={busy} onClick={save}>
+            {t(busy ? 'apiKeyVerifying' : 'saveToCloud')}
+          </Button>
+        </>
+      }
+    />
+  )
+}
+
 /** 删除确认保留在设置之上；失败可重试，成功只关闭确认弹窗。 */
 const DeleteAllConfirm = ({
   historyDelete,
@@ -163,7 +212,7 @@ const DeleteAllConfirm = ({
           <Button
             variant="danger"
             disabled={historyDelete.busy}
-            onClick={() => void historyDelete.confirm()}
+            onClick={historyDelete.confirm}
           >
             {t(historyDelete.busy ? 'historyDeleting' : 'deleteAllSessions')}
           </Button>
@@ -337,7 +386,7 @@ const ImportConfirm = ({
           <Button variant="outlined" size="m" autoFocus onClick={historyImport.cancel}>
             {t('cancel')}
           </Button>
-          <Button variant="dangerOutlined" size="m" onClick={() => void historyImport.confirm()}>
+          <Button variant="dangerOutlined" size="m" onClick={historyImport.confirm}>
             {t('historyImportConfirm')}
           </Button>
         </>
@@ -449,8 +498,8 @@ const useHistoryImport = () => {
   const [status, setStatus] = useState<Status>(null)
   const importing = useRef(false)
 
-  const confirm = async () => {
-    if (!file || importing.current) {
+  const runImport = async (task: (onProgress: ImportProgressCallback) => Promise<number>, failureKey: TranslationKey) => {
+    if (importing.current) {
       return
     }
     importing.current = true
@@ -458,17 +507,27 @@ const useHistoryImport = () => {
     setProgress({ processed: 0 })
     setStatus(null)
     try {
-      const count = await importHistory(file, (processed, total) =>
-        setProgress({ processed, total })
-      )
+      const count = await task((processed, total) => setProgress({ processed, total }))
       setStatus({ key: count === 1 ? 'historyImportedOne' : 'historyImported', params: { count } })
-    } catch {
-      setStatus({ key: 'historyImportFailed', error: true })
+    } catch (error) {
+      setStatus(error instanceof Error && error.message === 'backup_not_found'
+        ? { key: 'cloudBackupMissing', error: true }
+        : failureKey === 'cloudImportFailed'
+          ? errorStatus(failureKey, error)
+          : { key: failureKey, error: true })
     } finally {
       importing.current = false
       setProgress(null)
     }
   }
+  const confirm = () => {
+    if (!file) {
+      return Promise.resolve()
+    }
+    const selected = file
+    return runImport((onProgress) => importHistory(selected, onProgress), 'historyImportFailed')
+  }
+  const importFromServer = () => runImport(importHistoryFromServer, 'cloudImportFailed')
 
   return {
     file,
@@ -482,6 +541,7 @@ const useHistoryImport = () => {
       setStatus(null)
     },
     confirm,
+    importFromServer,
   }
 }
 
@@ -496,70 +556,116 @@ const ImportHistory = ({
   const t = useTranslate()
   const inputRef = useRef<HTMLInputElement>(null)
   const { progress } = historyImport
+  const user = useAuthStore((state) => state.user)
+  const backupInfo = useAuthStore((state) => state.backupInfo)
+  const [confirmCloudImport, setConfirmCloudImport] = useState(false)
+  const cloudDescription = backupInfo
+    ? backupInfo.exists
+      ? t('cloudBackupAvailable', { date: new Date(backupInfo.updatedAt ?? '').toLocaleString() })
+      : t('cloudBackupNotAvailable')
+    : t('historyImportDescription')
+
+  const canRestore = Boolean(user && backupInfo?.exists) && !disabled && !historyImport.busy
+  const confirmImportFromCloud = () => {
+    setConfirmCloudImport(false)
+    if (canRestore) {
+      historyImport.importFromServer().finally(() => refreshCloudBackupInfo())
+    }
+  }
 
   return (
-    <SettingCell
-      className={progress ? styles.importing : undefined}
-      label={t('historyImport')}
-      description={t('historyImportDescription')}
-      status={historyImport.status}
-      action={
-        <>
-          <Button
-            variant="outlined"
-            size="m"
-            className={clsx(styles.cellButton, styles.uploadButton)}
-            aria-busy={historyImport.busy}
-            aria-label={historyImport.busy ? t('historyImport') : undefined}
-            disabled={disabled}
-            onClick={() => inputRef.current?.click()}
-          >
-            {progress ? (
-              <IconLoadingOutline16 />
-            ) : (
-              <>
-                <IconUploadOutline14 />
-                {t('upload')}
-              </>
-            )}
-          </Button>
-          <input
-            ref={inputRef}
-            type="file"
-            accept=".zip,application/zip,application/x-zip-compressed"
-            hidden
-            onChange={(event) => {
-              const file = event.target.files?.[0]
-              event.target.value = ''
-              if (file) {
-                historyImport.select(file)
-              }
-            }}
-          />
-          {progress?.total !== undefined && (
-            <div className={styles.importProgress}>
-              <div
-                className={styles.importTrack}
-                role="progressbar"
-                aria-label={t('historyImport')}
-                aria-valuemin={0}
-                aria-valuemax={progress.total}
-                aria-valuenow={progress.processed}
-              >
-                <span
-                  style={{
-                    width: `${progress.total ? (progress.processed / progress.total) * 100 : 0}%`,
-                  }}
-                />
+    <>
+      <SettingCell
+        className={progress ? styles.importing : undefined}
+        label={t('historyImport')}
+        description={cloudDescription}
+        status={historyImport.status}
+        action={
+          <>
+            <Button
+              variant="outlined"
+              size="m"
+              className={styles.cellButton}
+              disabled={!canRestore}
+              onClick={() => setConfirmCloudImport(true)}
+            >
+              {t('cloudImport')}
+            </Button>
+            <Button
+              variant="outlined"
+              size="m"
+              className={clsx(styles.cellButton, styles.uploadButton)}
+              aria-busy={historyImport.busy}
+              aria-label={historyImport.busy ? t('historyImport') : undefined}
+              disabled={disabled || historyImport.busy}
+              onClick={() => inputRef.current?.click()}
+            >
+              {progress ? (
+                <IconLoadingOutline16 />
+              ) : (
+                <>
+                  <IconUploadOutline14 />
+                  {t('upload')}
+                </>
+              )}
+            </Button>
+            <input
+              ref={inputRef}
+              type="file"
+              accept=".zip,application/zip,application/x-zip-compressed"
+              hidden
+              onChange={(event) => {
+                const file = event.target.files?.[0]
+                event.target.value = ''
+                if (file) {
+                  historyImport.select(file)
+                }
+              }}
+            />
+            {progress?.total !== undefined && (
+              <div className={styles.importProgress}>
+                <div
+                  className={styles.importTrack}
+                  role="progressbar"
+                  aria-label={t('historyImport')}
+                  aria-valuemin={0}
+                  aria-valuemax={progress.total}
+                  aria-valuenow={progress.processed}
+                >
+                  <span
+                    style={{
+                      width: `${progress.total ? (progress.processed / progress.total) * 100 : 0}%`,
+                    }}
+                  />
+                </div>
+                <span>
+                  {progress.processed} / {progress.total}
+                </span>
               </div>
-              <span>
-                {progress.processed} / {progress.total}
-              </span>
-            </div>
-          )}
-        </>
-      }
-    />
+            )}
+          </>
+        }
+      />
+      {confirmCloudImport ? (
+        <Modal
+          title={t('cloudImportConfirmTitle')}
+          className={styles.importConfirm}
+          onClose={() => setConfirmCloudImport(false)}
+          footer={
+            <>
+              <Button variant="outlined" size="m" autoFocus onClick={() => setConfirmCloudImport(false)}>
+                {t('cancel')}
+              </Button>
+              <Button variant="dangerOutlined" size="m" onClick={confirmImportFromCloud}>
+                {t('cloudImport')}
+              </Button>
+            </>
+          }
+        >
+          <div className={styles.importConfirmText}>{t('cloudImportConfirmDescription')}</div>
+        </Modal>
+      ) : null}
+    </>
   )
 }
 
@@ -567,8 +673,11 @@ const ImportHistory = ({
 const ExportHistory = ({ disabled }: { disabled: boolean }) => {
   const t = useTranslate()
   const empty = useChatStore((state) => state.sessions.length === 0)
+  const user = useAuthStore((state) => state.user)
+  const backupInfo = useAuthStore((state) => state.backupInfo)
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<Status>(null)
+  const [confirmCloudExport, setConfirmCloudExport] = useState(false)
 
   const onExport = async () => {
     setBusy(true)
@@ -587,24 +696,79 @@ const ExportHistory = ({ disabled }: { disabled: boolean }) => {
       setBusy(false)
     }
   }
+  const onCloudExport = () => {
+    if (!user || busy) {
+      return
+    }
+    setConfirmCloudExport(true)
+  }
+  const confirmExportToCloud = async () => {
+    setConfirmCloudExport(false)
+    setBusy(true)
+    setStatus(null)
+    try {
+      await exportHistoryToServer()
+      setStatus({ key: 'cloudExportSuccess' })
+    } catch (error) {
+      setStatus(errorStatus('cloudExportFailed', error))
+    } finally {
+      setBusy(false)
+      await refreshCloudBackupInfo()
+    }
+  }
+  const description = backupInfo?.exists
+    ? t('cloudBackupAvailable', { date: new Date(backupInfo.updatedAt ?? '').toLocaleString() })
+    : t('historyExportDescription')
 
   return (
-    <SettingCell
-      label={t('exportAllLabel')}
-      description={t('historyExportDescription')}
-      status={status}
-      action={
-        <Button
-          variant="outlined"
-          size="m"
-          className={styles.cellButton}
-          disabled={disabled || busy || empty}
-          onClick={() => void onExport()}
+    <>
+      <SettingCell
+        label={t('exportAllLabel')}
+        description={description}
+        status={status}
+        action={
+          <>
+            <Button
+              variant="outlined"
+              size="m"
+              className={styles.cellButton}
+              disabled={disabled || busy || empty || !user}
+              onClick={onCloudExport}
+            >
+              {t('cloudExport')}
+            </Button>
+            <Button
+              variant="outlined"
+              size="m"
+              className={styles.cellButton}
+              disabled={disabled || busy || empty}
+              onClick={onExport}
+            >
+              <IconDownloadOutline16 />
+              {t('exportAllDownload')}
+            </Button>
+          </>
+        }
+      />
+      {confirmCloudExport ? (
+        <Modal
+          title={t('cloudExportConfirmTitle')}
+          className={styles.importConfirm}
+          onClose={() => setConfirmCloudExport(false)}
+          footer={
+            <>
+              <Button variant="outlined" size="m" autoFocus onClick={() => setConfirmCloudExport(false)}>
+                {t('cancel')}
+              </Button>
+              <Button variant="dangerOutlined" size="m" onClick={confirmExportToCloud}>
+                {t('cloudExport')}
+              </Button>
+            </>
+          }
         >
-          <IconDownloadOutline16 />
-          {t('exportAllDownload')}
-        </Button>
-      }
-    />
+          <div className={styles.importConfirmText}>{t('cloudExportConfirmDescription')}</div>
+        </Modal>
+      ) : null}
+    </>
   )
 }
