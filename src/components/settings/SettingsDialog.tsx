@@ -542,7 +542,7 @@ const ImportHistory = ({
   return (
     <SettingCell
       label={t('historyImport')}
-      description={historyImport.status ? undefined : historyImport.busy ? t('historyImporting') : t('historyImportDescription')}
+      description={backupInfo ? cloudDescription : t('historyImportDescription')}
       status={cloudStatus ?? historyImport.status}
       action={
         <>
