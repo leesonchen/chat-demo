@@ -54,6 +54,17 @@ export const migrateDatabase = (db) => {
       updated_at INTEGER NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS wechat_login_attempts (
+      ticket_hash TEXT PRIMARY KEY,
+      poll_secret_hash TEXT NOT NULL,
+      state_hash TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL DEFAULT 'pending',
+      user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+      expires_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS wechat_login_attempts_expiry_idx ON wechat_login_attempts(expires_at);
+
     CREATE TABLE IF NOT EXISTS oauth_states (
       state_hash TEXT PRIMARY KEY,
       expires_at INTEGER NOT NULL,
