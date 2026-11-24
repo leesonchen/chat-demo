@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { once } from 'node:events'
 import { randomBytes, randomUUID } from 'node:crypto'
-import { createDatabase } from '../database.mjs'
+import { createDatabase, migrateDatabase } from '../database.mjs'
 import { createAppServer } from '../app.mjs'
 import { sha256 } from '../security.mjs'
 
@@ -216,4 +216,107 @@ test('WeChat Official Account QR login completes through a one-time browser poll
     body: JSON.stringify({ ticket: challenge.ticket, pollSecret: challenge.pollSecret }),
   })
   assert.equal(replayPoll.status, 404)
+})
+
+test('the same WeChat login can opt in to display profile without changing the account', async (t) => {
+  const origin = 'http://localhost:8090'
+  let profileRequests = 0
+  const app = await makeServer({
+    wechatAppId: 'wx-test-app',
+    wechatAppSecret: 'test-secret',
+    wechatRedirectUri: origin + '/api/auth/wechat/callback',
+    fetchImpl: async (url) => {
+      if (url.pathname === '/sns/oauth2/access_token') {
+        return Response.json({
+          access_token: 'web-token',
+          openid: 'my-openid',
+          scope: url.searchParams.get('code') === 'base-scope' ? 'snsapi_base' : 'snsapi_userinfo',
+        })
+      }
+      profileRequests += 1
+      assert.equal(url.pathname, '/sns/userinfo')
+      assert.equal(url.searchParams.get('openid'), 'my-openid')
+      return Response.json({
+        openid: 'my-openid',
+        nickname: '新昵称',
+        headimgurl: 'http://thirdwx.qlogo.cn/mmopen/example/132',
+      })
+    },
+  })
+  t.after(app.close)
+  app.db.prepare(`INSERT INTO oauth_identities (id, user_id, provider, openid, created_at, updated_at)
+    VALUES (?, ?, 'wechat', 'my-openid', ?, ?)`).run(randomUUID(), app.userId, Date.now(), Date.now())
+
+  const headers = { origin, 'content-type': 'application/json' }
+  const start = async (includeProfile) => {
+    const response = await fetch(app.baseUrl + '/api/auth/wechat/start', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ includeProfile }),
+    })
+    assert.equal(response.status, 200)
+    const { ticket, pollSecret, authorizeUrl } = await response.json()
+    const authorize = new URL(authorizeUrl)
+    assert.equal(authorize.searchParams.get('scope'), includeProfile ? 'snsapi_userinfo' : 'snsapi_base')
+    const state = authorize.searchParams.get('state')
+    return {
+      callback: (code) => fetch(app.baseUrl + '/api/auth/wechat/callback?' + new URLSearchParams({ state, code })),
+      poll: () => fetch(app.baseUrl + '/api/auth/wechat/poll', {
+        method: 'POST', headers, body: JSON.stringify({ ticket, pollSecret }),
+      }),
+    }
+  }
+
+  for (const [code, status] of [['authdeny', 400], ['base-scope', 502]]) {
+    const attempt = await start(true)
+    assert.equal((await attempt.callback(code)).status, status)
+    assert.equal((await attempt.poll()).status, 400)
+  }
+  assert.equal(profileRequests, 0)
+
+  const basic = await start(false)
+  // Even a token with profile scope does not trigger profile access for an opt-out login.
+  assert.equal((await basic.callback('granted')).status, 200)
+  assert.equal((await (await basic.poll()).json()).user.nickname, 'Test User')
+  assert.equal(profileRequests, 0)
+
+  const consent = await start(true)
+  assert.equal((await consent.callback('granted')).status, 200)
+  const response = await consent.poll()
+  assert.equal(response.status, 200)
+  assert.match(response.headers.get('set-cookie'), /chat_demo_session=/)
+  const expectedUser = {
+    id: app.userId,
+    nickname: '新昵称',
+    avatarUrl: 'https://thirdwx.qlogo.cn/mmopen/example/132',
+  }
+  assert.deepEqual(await response.json(), { status: 'authenticated', user: expectedUser })
+  assert.equal(profileRequests, 1)
+  assert.equal((await consent.poll()).status, 404)
+
+  const next = await start(false)
+  assert.equal((await next.callback('base-scope')).status, 200)
+  assert.deepEqual((await (await next.poll()).json()).user, expectedUser)
+  assert.equal(profileRequests, 1)
+})
+
+test('database upgrade preserves basic login attempts and retires separate profile QR codes', (t) => {
+  const db = createDatabase(':memory:')
+  t.after(() => db.close())
+  db.exec(`
+    ALTER TABLE wechat_login_attempts DROP COLUMN include_profile;
+    CREATE TABLE wechat_profile_attempts (
+      ticket_hash TEXT PRIMARY KEY REFERENCES wechat_login_attempts(ticket_hash) ON DELETE CASCADE
+    );
+    INSERT INTO wechat_login_attempts (ticket_hash, poll_secret_hash, state_hash, expires_at, created_at)
+      VALUES ('basic', 'poll-a', 'state-a', 2, 1), ('separate', 'poll-b', 'state-b', 2, 1);
+    INSERT INTO wechat_profile_attempts (ticket_hash) VALUES ('separate');
+  `)
+
+  migrateDatabase(db)
+  const attempts = db.prepare('SELECT ticket_hash, include_profile FROM wechat_login_attempts').all()
+  assert.equal(attempts.length, 1)
+  assert.equal(attempts[0].ticket_hash, 'basic')
+  assert.equal(attempts[0].include_profile, 0)
+  assert.equal(db.prepare('SELECT count(*) AS count FROM wechat_profile_attempts').get().count, 0)
 })

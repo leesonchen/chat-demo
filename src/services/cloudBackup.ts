@@ -1,4 +1,5 @@
 import { exportHistory, importHistory } from './chat/backup.js'
+import type { ImportProgressCallback } from './chat/history/importArchive.js'
 import { refreshCloudBackupInfo, useAuthStore } from './auth.js'
 
 const ensureSignedIn = () => {
@@ -30,7 +31,7 @@ export const exportHistoryToServer = async () => {
   }
   await refreshCloudBackupInfo()
 }
-export const importHistoryFromServer = async () => {
+export const importHistoryFromServer = async (onProgress?: ImportProgressCallback) => {
   ensureSignedIn()
   const response = await fetch('/api/backup', { credentials: 'same-origin', cache: 'no-store' })
   if (!response.ok) {
@@ -48,5 +49,5 @@ export const importHistoryFromServer = async () => {
     }
   }
   const file = new File([blob], 'chat-demo-cloud-backup.zip', { type: 'application/zip' })
-  return importHistory(file)
+  return importHistory(file, onProgress)
 }

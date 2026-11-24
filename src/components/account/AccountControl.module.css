@@ -103,3 +103,18 @@
   color: var(--dsw-alias-label-tertiary);
   font-size: 12px;
 }
+
+.profileOption {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  max-width: 280px;
+  font-size: 14px;
+  line-height: 22px;
+  text-align: left;
+}
+
+.profileOption input {
+  flex-shrink: 0;
+  margin: 4px 0 0;
+}

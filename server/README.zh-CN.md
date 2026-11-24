@@ -2,23 +2,12 @@
 
 本服务为 chat-demo 提供微信服务号扫码登录、账号 API Key 保存和手动聊天记录云端备份。未部署服务端时，原有本地聊天功能仍可独立使用。
 
-## 生产环境信息
-
-- 网站域名：`https://deepseek.leeson.top`
-- API：`https://deepseek.leeson.top/api/`
-- 微信 OAuth 回调：`https://deepseek.leeson.top/api/auth/wechat/callback`
-- 微信服务号 AppID：`wx1713b39983b65190`
-- 微信授权方式：公众号网页授权 `snsapi_base`
-
-此版本直接使用现有已认证微信公众号（服务号），不需要微信开放平台网站应用，也不需要接管公众号消息推送服务器。原先的 `wx1.leeson.top/wx` 消息推送服务不再参与 chat-demo 登录流程。
-
 ## 微信公众平台准备
 
-1. 使用现有服务号 AppID：`wx1713b39983b65190`。
-2. 在「设置与开发 → 公众号设置 → 功能设置 → 网页授权域名」中配置 `deepseek.leeson.top`。
-3. 将微信提供的 `MP_verify_xxx.txt` 放在该域名网站根目录，保证 `https://deepseek.leeson.top/MP_verify_xxx.txt` 可访问，然后完成校验。用户已完成校验时无需重复操作。
-4. 从现有服务端配置或安全凭据库中找回当前服务号 AppSecret。不要为了本项目直接重置 AppSecret；若确实遗失，先确认其他现存业务是否依赖它，再统一更新。
-5. 不要修改现有公众号消息推送 URL、Token、EncodingAESKey 或 IP 白名单。本登录流程使用网页 OAuth，不使用公众号消息推送回调。
+1. 使用已认证的微信服务号，在「网页授权域名」中填写已部署站点的 HTTPS 主机名。
+2. 若微信要求验证域名，将服务号对应的验证文件放在站点根目录，再完成校验。
+
+网页授权使用站点的 `/api/auth/wechat/callback` 路径。公众号的消息推送配置独立于此回调。
 
 ## 配置服务端
 
@@ -31,10 +20,10 @@ chmod 600 server/.env
 
 编辑 `server/.env`：
 
-- `APP_ORIGIN=https://deepseek.leeson.top`
-- `WECHAT_APP_ID=wx1713b39983b65190`
+- `APP_ORIGIN=https://chat.example.com`
+- `WECHAT_APP_ID`：你的微信服务号 AppID。
 - `WECHAT_APP_SECRET`：现有服务号 AppSecret。
-- `WECHAT_REDIRECT_URI=https://deepseek.leeson.top/api/auth/wechat/callback`
+- `WECHAT_REDIRECT_URI=https://chat.example.com/api/auth/wechat/callback`
 - `API_KEY_ENCRYPTION_KEY`：使用 `openssl rand -base64 32` 生成 32 字节密钥。
 - `DATA_DIR`：SQLite 数据库和 ZIP 备份的持久化目录。
 
@@ -48,14 +37,14 @@ pnpm build
 pnpm server
 ```
 
-服务端默认监听 `127.0.0.1:8091`。Nginx/Caddy 应为 `deepseek.leeson.top` 配置 HTTPS，并将同域名的 `/api/` 转发到 `127.0.0.1:8091`，其他路径提供静态 `dist/` 文件。
+服务端默认监听 `127.0.0.1:8091`。Nginx/Caddy 应为站点配置 HTTPS，并将同域名的 `/api/` 转发到 `127.0.0.1:8091`，其他路径提供静态 `dist/` 文件。
 
 Nginx 示例：
 
 ```nginx
 server {
     listen 443 ssl http2;
-    server_name deepseek.leeson.top;
+    server_name chat.example.com;
 
     root /var/www/chat-demo/dist;
     index index.html;
@@ -82,13 +71,13 @@ server {
 
 ## 微信扫码登录流程
 
-1. 电脑端请求服务端创建一次性登录事务。
+1. 打开「微信扫码登录」，可选勾选允许保存并显示微信昵称和头像，然后生成二维码。
 2. 前端生成二维码，二维码内容是微信服务号网页授权 URL。
-3. 手机微信扫码后，通过 `snsapi_base` 静默授权并回调到 chat-demo。
+3. 用手机微信扫码。默认使用 `snsapi_base` 获取 OpenID。勾选资料选项时使用 `snsapi_userinfo`，由微信确认资料授权。
 4. 服务端用 AppID、AppSecret 和一次性 code 换取 OpenID。
 5. 电脑端使用独立的轮询密钥领取登录会话。二维码 state、电脑端轮询 ticket 和轮询密钥彼此分离，均有短有效期且只能使用一次。
 
-`snsapi_base` 只提供 OpenID，不返回昵称和头像；首次登录的用户先显示为「微信用户」。如果未来确实需要头像和昵称，再单独评估 `snsapi_userinfo` 的用户授权体验。
+只有勾选资料选项且微信授权后，本站才会读取并保存昵称与头像地址。普通扫码仍会登录同一账号，并保留之前已授权的资料。
 
 ## 数据行为
 

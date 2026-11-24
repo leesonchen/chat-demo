@@ -66,17 +66,23 @@ const wechatJson = async (fetchImpl, url) => {
   if (body.errcode) throw new Error('WeChat authorization rejected')
   return body
 }
-const findOrCreateWechatUser = (db, openid, unionid, now) => {
+const findOrCreateWechatUser = (db, openid, unionid, profile, now) => {
   db.exec('BEGIN IMMEDIATE')
   try {
     const identity = db.prepare("SELECT user_id FROM oauth_identities WHERE provider = 'wechat' AND openid = ?").get(openid)
     const userId = identity?.user_id ?? randomUUID()
     if (!identity) {
-      db.prepare("INSERT INTO users (id, nickname, avatar_url, created_at, updated_at) VALUES (?, '微信用户', '', ?, ?)").run(userId, now, now)
+      db.prepare('INSERT INTO users (id, nickname, avatar_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
+        .run(userId, profile?.nickname || '微信用户', profile?.avatarUrl ?? '', now, now)
       db.prepare("INSERT INTO oauth_identities (id, user_id, provider, openid, unionid, created_at, updated_at) VALUES (?, ?, 'wechat', ?, ?, ?, ?)").run(randomUUID(), userId, openid, typeof unionid === 'string' ? unionid : null, now, now)
     } else {
       db.prepare("UPDATE oauth_identities SET unionid = COALESCE(?, unionid), updated_at = ? WHERE provider = 'wechat' AND openid = ?").run(typeof unionid === 'string' ? unionid : null, now, openid)
-      db.prepare("UPDATE users SET updated_at = ? WHERE id = ?").run(now, userId)
+      if (profile) {
+        db.prepare('UPDATE users SET nickname = ?, avatar_url = ?, updated_at = ? WHERE id = ?')
+          .run(profile.nickname || '微信用户', profile.avatarUrl, now, userId)
+      } else {
+        db.prepare('UPDATE users SET updated_at = ? WHERE id = ?').run(now, userId)
+      }
     }
     db.exec('COMMIT')
     return db.prepare('SELECT id, nickname, avatar_url FROM users WHERE id = ?').get(userId)
@@ -85,21 +91,50 @@ const findOrCreateWechatUser = (db, openid, unionid, now) => {
     throw error
   }
 }
+const wechatAvatarUrl = (value) => {
+  if (typeof value !== 'string' || value.length > 2048) return ''
+  const url = URL.parse(value)
+  if (!url || !['http:', 'https:'].includes(url.protocol) ||
+      !['thirdwx.qlogo.cn', 'wx.qlogo.cn'].includes(url.hostname) ||
+      url.username || url.password || url.port) return ''
+  url.protocol = 'https:'
+  return url.href
+}
+
+const fetchWechatProfile = async (fetchImpl, token) => {
+  if (typeof token.scope !== 'string' || !token.scope.split(/[ ,]+/).includes('snsapi_userinfo')) {
+    throw new Error('WeChat profile permission was not granted')
+  }
+  const url = new URL('https://api.weixin.qq.com/sns/userinfo')
+  url.search = new URLSearchParams({ access_token: token.access_token, openid: token.openid, lang: 'zh_CN' }).toString()
+  const profile = await wechatJson(fetchImpl, url)
+  if (profile.openid !== token.openid) throw new Error('Unexpected WeChat profile identity')
+  const nickname = typeof profile.nickname === 'string' ? Array.from(profile.nickname.trim()).slice(0, 80).join('') : ''
+  const avatarUrl = wechatAvatarUrl(profile.headimgurl)
+  if (!nickname && !avatarUrl) throw new Error('WeChat returned no display profile')
+  return { nickname, avatarUrl }
+}
+
 const wechatCallback = async (url, res, { db, config, fetchImpl, now }) => {
   const state = url.searchParams.get('state')
   const code = url.searchParams.get('code')
-  if (!state || !code || state.length > 256 || !config.wechatAppId || !config.wechatAppSecret) {
+  if (!state || state.length > 256 || !config.wechatAppId || !config.wechatAppSecret) {
     html(res, 400, false)
     return
   }
 
   const stateHash = sha256(state)
   const attempt = db.prepare(`
-    SELECT ticket_hash, status
+    SELECT ticket_hash, status, include_profile, expires_at
     FROM wechat_login_attempts
     WHERE state_hash = ? AND expires_at > ?
   `).get(stateHash, now())
   if (!attempt || attempt.status !== 'pending') {
+    html(res, 400, false)
+    return
+  }
+  if (!code || code === 'authdeny') {
+    db.prepare("UPDATE wechat_login_attempts SET status = 'failed' WHERE ticket_hash = ? AND status = 'pending'").run(attempt.ticket_hash)
     html(res, 400, false)
     return
   }
@@ -122,11 +157,13 @@ const wechatCallback = async (url, res, { db, config, fetchImpl, now }) => {
       grant_type: 'authorization_code',
     }).toString()
     const token = await wechatJson(fetchImpl, tokenUrl)
-    if (!token.openid || !token.access_token) {
+    if (typeof token.openid !== 'string' || !token.openid || typeof token.access_token !== 'string' || !token.access_token) {
       throw new Error('Incomplete WeChat token')
     }
 
-    const user = findOrCreateWechatUser(db, token.openid, token.unionid, now())
+    const profile = attempt.include_profile ? await fetchWechatProfile(fetchImpl, token) : null
+    if (attempt.expires_at <= now()) throw new Error('WeChat login transaction expired')
+    const user = findOrCreateWechatUser(db, token.openid, token.unionid, profile, now())
     const completed = db.prepare(`
       UPDATE wechat_login_attempts
       SET status = 'authorized', user_id = ?
@@ -175,24 +212,31 @@ export const createAppServer = ({ db, config, fetchImpl = fetch, now = Date.now 
       if (method === 'GET' && url.pathname === '/api/health') return json(res, 200, { ok: true })
       if (method === 'POST' && url.pathname === '/api/auth/wechat/start') {
         verifyOrigin(req, config)
-        if (!config.wechatAppId || !config.wechatRedirectUri) {
+        if (!config.wechatAppId || !config.wechatAppSecret || !config.wechatRedirectUri) {
           throw new HttpError(503, 'wechat_login_not_configured')
         }
+        const body = req.headers['transfer-encoding'] || Number(req.headers['content-length']) > 0
+          ? await readJson(req)
+          : {}
+        if (body.includeProfile !== undefined && typeof body.includeProfile !== 'boolean') {
+          throw new HttpError(400, 'invalid_profile_option')
+        }
+        const includeProfile = body.includeProfile === true
         const ticket = randomBytes(32).toString('base64url')
         const pollSecret = randomBytes(32).toString('base64url')
         const state = randomBytes(24).toString('hex')
         db.prepare('DELETE FROM wechat_login_attempts WHERE expires_at <= ?').run(time)
         db.prepare(`
           INSERT INTO wechat_login_attempts
-            (ticket_hash, poll_secret_hash, state_hash, status, expires_at, created_at)
-          VALUES (?, ?, ?, 'pending', ?, ?)
-        `).run(sha256(ticket), sha256(pollSecret), sha256(state), time + STATE_TTL, time)
+            (ticket_hash, poll_secret_hash, state_hash, include_profile, status, expires_at, created_at)
+          VALUES (?, ?, ?, ?, 'pending', ?, ?)
+        `).run(sha256(ticket), sha256(pollSecret), sha256(state), Number(includeProfile), time + STATE_TTL, time)
         const authorize = new URL('https://open.weixin.qq.com/connect/oauth2/authorize')
         authorize.search = new URLSearchParams({
           appid: config.wechatAppId,
           redirect_uri: config.wechatRedirectUri,
           response_type: 'code',
-          scope: 'snsapi_base',
+          scope: includeProfile ? 'snsapi_userinfo' : 'snsapi_base',
           state,
         }).toString()
         authorize.hash = 'wechat_redirect'
@@ -261,7 +305,8 @@ export const createAppServer = ({ db, config, fetchImpl = fetch, now = Date.now 
           status: 'authenticated',
           user: { id: user.id, nickname: user.nickname, avatarUrl: user.avatar_url },
         }, { 'Set-Cookie': setCookie(sessionToken, config.secureCookies) })
-      }      if (method === 'GET' && url.pathname === '/api/auth/me') { const session = getSession(req, db, time); return json(res, 200, { user: session?.user ?? null }) }
+      }
+      if (method === 'GET' && url.pathname === '/api/auth/me') { const session = getSession(req, db, time); return json(res, 200, { user: session?.user ?? null }) }
       if (method === 'POST' && url.pathname === '/api/auth/logout') {
         verifyOrigin(req, config); const session = getSession(req, db, time)
         if (session) db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(session.tokenHash)

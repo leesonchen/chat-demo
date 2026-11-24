@@ -15,25 +15,32 @@ export const AccountControl = () => {
   const ready = useAuthStore((state) => state.ready)
   const loginBusy = useAuthStore((state) => state.loginBusy)
   const [menuOpen, setMenuOpen] = useState(false)
-  const [challenge, setChallenge] = useState<WechatLoginChallenge | null>(null)
-  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null)
+  const [loginDialog, setLoginDialog] = useState<
+    | { includeProfile: boolean }
+    | { includeProfile: boolean; challenge: WechatLoginChallenge; qrDataUrl: string }
+    | null
+  >(null)
+  const [brokenAvatar, setBrokenAvatar] = useState('')
 
-  const onLogin = async () => {
+  const generateQr = async () => {
+    if (!loginDialog || 'challenge' in loginDialog) {
+      return
+    }
+    const { includeProfile } = loginDialog
     try {
-      const next = await beginWechatLogin()
+      const challenge = await beginWechatLogin(includeProfile)
       const qr = qrcode(0, 'M')
-      qr.addData(next.authorizeUrl)
+      qr.addData(challenge.authorizeUrl)
       qr.make()
-      setQrDataUrl(qr.createDataURL(6, 4))
-      setChallenge(next)
+      const qrDataUrl = qr.createDataURL(6, 4)
+      setLoginDialog((current) =>
+        current === loginDialog ? { includeProfile, challenge, qrDataUrl } : current
+      )
     } catch {
       showToast({ key: 'wechatLoginFailed', type: 'error' })
     }
   }
-  const closeLogin = () => {
-    setChallenge(null)
-    setQrDataUrl(null)
-  }
+  const closeScan = () => setLoginDialog(null)
   const onLogout = async () => {
     try {
       await logout()
@@ -45,9 +52,10 @@ export const AccountControl = () => {
   }
 
   useEffect(() => {
-    if (!challenge) {
+    if (!loginDialog || !('challenge' in loginDialog)) {
       return
     }
+    const { challenge, includeProfile } = loginDialog
     let stopped = false
     let polling = false
     const poll = async () => {
@@ -58,7 +66,7 @@ export const AccountControl = () => {
       try {
         const authenticatedUser = await pollWechatLogin(challenge)
         if (authenticatedUser && !stopped) {
-          closeLogin()
+          closeScan()
           showToast({ key: 'wechatLoggedIn' })
           if (useAuthStore.getState().needsKeyUpload || !useSettings.getState().apiKey) {
             openSettings('data')
@@ -66,11 +74,11 @@ export const AccountControl = () => {
         }
       } catch (error) {
         if (!stopped) {
-          closeLogin()
+          setLoginDialog({ includeProfile: false })
           showToast({
             key: error instanceof Error && error.message === 'login_ticket_expired'
               ? 'wechatLoginExpired'
-              : 'wechatLoginFailed',
+              : includeProfile ? 'wechatProfileFailed' : 'wechatLoginFailed',
             type: 'error',
           })
         }
@@ -86,7 +94,7 @@ export const AccountControl = () => {
       stopped = true
       window.clearInterval(timer)
     }
-  }, [challenge])
+  }, [loginDialog])
 
   if (!ready) {
     return null
@@ -97,7 +105,11 @@ export const AccountControl = () => {
         <>
           <button type="button" className={styles.accountButton} aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}>
             <span className={styles.avatar}>
-              {user.avatarUrl ? <img src={user.avatarUrl} alt="" referrerPolicy="no-referrer" /> : (user.nickname.slice(0, 1) || t('wechatUser').slice(0, 1))}
+              {user.avatarUrl && user.avatarUrl !== brokenAvatar ? (
+                <img src={user.avatarUrl} alt="" referrerPolicy="no-referrer" onError={() => setBrokenAvatar(user.avatarUrl)} />
+              ) : (
+                Array.from(user.nickname || t('wechatUser'))[0]
+              )}
             </span>
             <span className={styles.nickname}>{user.nickname || t('wechatUser')}</span>
             <span className={styles.chevron}>⌃</span>
@@ -111,24 +123,45 @@ export const AccountControl = () => {
           ) : null}
         </>
       ) : (
-        <button type="button" className={styles.loginButton} disabled={loginBusy} onClick={onLogin}>
+        <button type="button" className={styles.loginButton} disabled={loginBusy} onClick={() => setLoginDialog({ includeProfile: false })}>
           <span className={styles.avatar}>{t('wechatUser').slice(0, 1)}</span>
-          {t(loginBusy ? 'wechatLoginOpening' : 'wechatLogin')}
+          {t('wechatLogin')}
         </button>
       )}
-      {challenge && qrDataUrl ? (
+      {loginDialog ? (
         <Modal
           title={t('wechatScanTitle')}
           closable
-          onClose={closeLogin}
+          onClose={closeScan}
           className={styles.loginModal}
         >
-          <div className={styles.qrContent}>
-            <img className={styles.qrCode} src={qrDataUrl} alt={t('wechatScanTitle')} />
-            <div className={styles.qrInstruction}>{t('wechatScanInstructions')}</div>
-            <div className={styles.qrExpiry}>{t('wechatScanExpires', { minutes: Math.ceil(challenge.expiresIn / 60) })}</div>
-            <Button variant="outlined" size="m" onClick={closeLogin}>{t('cancel')}</Button>
-          </div>
+          {'challenge' in loginDialog ? (
+            <div className={styles.qrContent}>
+              <img className={styles.qrCode} src={loginDialog.qrDataUrl} alt={t('wechatScanTitle')} />
+              <div className={styles.qrInstruction}>
+                {t(loginDialog.includeProfile ? 'wechatProfileInstructions' : 'wechatScanInstructions')}
+              </div>
+              <div className={styles.qrExpiry}>
+                {t('wechatScanExpires', { minutes: Math.ceil(loginDialog.challenge.expiresIn / 60) })}
+              </div>
+              <Button variant="outlined" size="m" onClick={closeScan}>{t('cancel')}</Button>
+            </div>
+          ) : (
+            <div className={styles.qrContent}>
+              <label className={styles.profileOption}>
+                <input
+                  type="checkbox"
+                  checked={loginDialog.includeProfile}
+                  disabled={loginBusy}
+                  onChange={(event) => setLoginDialog({ includeProfile: event.target.checked })}
+                />
+                {t('wechatProfileOption')}
+              </label>
+              <Button variant="outlined" size="m" disabled={loginBusy} onClick={generateQr}>
+                {t(loginBusy ? 'wechatLoginOpening' : 'wechatShowQr')}
+              </Button>
+            </div>
+          )}
         </Modal>
       ) : null}
     </div>
