@@ -3,6 +3,7 @@ import { setApiKey, useSettings } from './settings.js'
 
 export type AuthUser = { id: string; nickname: string; avatarUrl: string }
 export type CloudBackupInfo = { exists: boolean; byteSize: number; updatedAt: string | null }
+export type WechatLoginChallenge = { ticket: string; pollSecret: string; authorizeUrl: string; expiresIn: number }
 type AuthState = {
   ready: boolean
   user: AuthUser | null
@@ -34,8 +35,6 @@ const request = async <T>(url: string, init: RequestInit = {}): Promise<T> => {
   }
   return (await response.json()) as T
 }
-const wait = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms))
-
 export const useAuthStore = create<AuthState>(() => ({
   ready: false, user: null, loginBusy: false, needsKeyUpload: false, backupInfo: null,
 }))
@@ -77,40 +76,29 @@ export const initAuth = async () => {
     useAuthStore.setState({ ready: true })
   }
 }
-export const beginWechatLogin = async () => {
-  const popup = window.open('about:blank', 'chat-demo-wechat-login', 'popup,width=520,height=680,resizable=yes,scrollbars=yes')
-  if (!popup) {
-    throw new Error('popup_blocked')
-  }
+export const beginWechatLogin = async (): Promise<WechatLoginChallenge> => {
   useAuthStore.setState({ loginBusy: true })
   try {
-    const { authorizeUrl } = await request<{ authorizeUrl: string }>('/api/auth/wechat/start')
-    popup.location.href = authorizeUrl
-    let closedChecks = 0
-    for (let attempt = 0; attempt < 300; attempt += 1) {
-      const result = await request<{ user: AuthUser | null }>('/api/auth/me').catch(() => null)
-      if (result?.user) {
-        useAuthStore.setState({ user: result.user })
-        await loadAccountData(result.user)
-        if (!popup.closed) {
-          popup.close()
-        }
-        return result.user
-      }
-      if (popup.closed && ++closedChecks >= 4) {
-        throw new Error('login_cancelled')
-      }
-      await wait(1000)
-    }
-    throw new Error('login_timeout')
-  } catch (error) {
-    if (!popup.closed) {
-      popup.close()
-    }
-    throw error
+    return await request<WechatLoginChallenge>('/api/auth/wechat/start')
   } finally {
     useAuthStore.setState({ loginBusy: false })
   }
+}
+export const pollWechatLogin = async (challenge: WechatLoginChallenge): Promise<AuthUser | null> => {
+  const result = await request<
+    | { status: 'pending' }
+    | { status: 'authenticated'; user: AuthUser }
+  >('/api/auth/wechat/poll', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ticket: challenge.ticket, pollSecret: challenge.pollSecret }),
+  })
+  if (result.status === 'pending') {
+    return null
+  }
+  useAuthStore.setState({ user: result.user })
+  await loadAccountData(result.user)
+  return result.user
 }
 export const logout = async () => {
   await request<undefined>('/api/auth/logout', { method: 'POST' })
