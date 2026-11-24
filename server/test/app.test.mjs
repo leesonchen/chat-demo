@@ -6,7 +6,7 @@ import { createDatabase } from '../database.mjs'
 import { createAppServer } from '../app.mjs'
 import { sha256 } from '../security.mjs'
 
-const makeServer = async () => {
+const makeServer = async (options = {}) => {
   const db = createDatabase(':memory:')
   const now = Date.now()
   const userId = randomUUID()
@@ -24,10 +24,11 @@ const makeServer = async () => {
       backupDir,
       encryptionKey: key,
       secureCookies: false,
-      wechatAppId: '',
-      wechatAppSecret: '',
-      wechatRedirectUri: '',
+      wechatAppId: options.wechatAppId ?? '',
+      wechatAppSecret: options.wechatAppSecret ?? '',
+      wechatRedirectUri: options.wechatRedirectUri ?? '',
     },
+    fetchImpl: options.fetchImpl,
   })
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
@@ -119,4 +120,46 @@ test('WeChat login start refuses to run until credentials are configured', async
   t.after(app.close)
   const response = await fetch(`${app.baseUrl}/api/auth/wechat/start`)
   assert.equal(response.status, 503)
+})
+
+test('WeChat OAuth requires a browser-bound one-time state and creates an identity', async (t) => {
+  const app = await makeServer({
+    wechatAppId: 'test-app',
+    wechatAppSecret: 'test-secret',
+    wechatRedirectUri: 'http://localhost:8090/api/auth/wechat/callback',
+    fetchImpl: async (input) => {
+      const url = new URL(input)
+      if (url.pathname.endsWith('/access_token')) {
+        return { ok: true, json: async () => ({ access_token: 'wechat-access-token', openid: 'wechat-openid' }) }
+      }
+      return { ok: true, json: async () => ({ openid: 'wechat-openid', unionid: 'wechat-unionid', nickname: 'WeChat User', headimgurl: 'https://example.com/avatar.png' }) }
+    },
+  })
+  t.after(app.close)
+
+  const start = await fetch(`${app.baseUrl}/api/auth/wechat/start`)
+  assert.equal(start.status, 200)
+  const { authorizeUrl } = await start.json()
+  const authorize = new URL(authorizeUrl)
+  const state = authorize.searchParams.get('state')
+  assert.equal(authorize.searchParams.get('scope'), 'snsapi_login')
+  const stateCookie = start.headers.get('set-cookie')
+  assert.ok(stateCookie?.includes(`chat_demo_oauth_state=${state}`))
+
+  const forged = await fetch(`${app.baseUrl}/api/auth/wechat/callback?code=code&state=${state}`)
+  assert.equal(forged.status, 400)
+
+  const callback = await fetch(`${app.baseUrl}/api/auth/wechat/callback?code=code&state=${state}`, {
+    headers: { cookie: `chat_demo_oauth_state=${state}` },
+  })
+  assert.equal(callback.status, 200)
+  assert.ok(callback.headers.get('set-cookie')?.includes('chat_demo_session='))
+  const identity = app.db.prepare("SELECT user_id, unionid FROM oauth_identities WHERE provider = 'wechat' AND openid = ?").get('wechat-openid')
+  assert.ok(identity)
+  assert.equal(identity.unionid, 'wechat-unionid')
+
+  const replay = await fetch(`${app.baseUrl}/api/auth/wechat/callback?code=code&state=${state}`, {
+    headers: { cookie: `chat_demo_oauth_state=${state}` },
+  })
+  assert.equal(replay.status, 400)
 })
