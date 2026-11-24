@@ -8,7 +8,6 @@ import { pipeline } from 'node:stream/promises'
 import { decryptSecret, encryptSecret, sha256 } from './security.mjs'
 
 const COOKIE = 'chat_demo_session'
-const OAUTH_STATE_COOKIE = 'chat_demo_oauth_state'
 const SESSION_TTL = 30 * 24 * 60 * 60 * 1000
 const STATE_TTL = 10 * 60 * 1000
 const MAX_JSON = 64 * 1024
@@ -43,8 +42,6 @@ const cookies = (header = '') => Object.fromEntries(header.split(';').map((x) =>
 }))
 const setCookie = (token, secure) => `${COOKIE}=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}${secure ? '; Secure' : ''}`
 const clearCookie = (secure) => `${COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0${secure ? '; Secure' : ''}`
-const oauthStateCookie = (state, secure) => `${OAUTH_STATE_COOKIE}=${encodeURIComponent(state)}; HttpOnly; Path=/api/auth/wechat/callback; SameSite=Lax; Max-Age=${STATE_TTL / 1000}${secure ? '; Secure' : ''}`
-const clearOauthStateCookie = (secure) => `${OAUTH_STATE_COOKIE}=; HttpOnly; Path=/api/auth/wechat/callback; SameSite=Lax; Max-Age=0${secure ? '; Secure' : ''}`
 const readJson = async (req) => {
   const chunks = []; let size = 0
   for await (const chunk of req) { size += chunk.length; if (size > MAX_JSON) throw new HttpError(413, 'body_too_large'); chunks.push(chunk) }
@@ -176,7 +173,8 @@ export const createAppServer = ({ db, config, fetchImpl = fetch, now = Date.now 
     try {
       const url = new URL(req.url ?? '/', config.appOrigin), method = req.method ?? 'GET'
       if (method === 'GET' && url.pathname === '/api/health') return json(res, 200, { ok: true })
-      if (method === 'GET' && url.pathname === '/api/auth/wechat/start') {
+      if (method === 'POST' && url.pathname === '/api/auth/wechat/start') {
+        verifyOrigin(req, config)
         if (!config.wechatAppId || !config.wechatRedirectUri) {
           throw new HttpError(503, 'wechat_login_not_configured')
         }
