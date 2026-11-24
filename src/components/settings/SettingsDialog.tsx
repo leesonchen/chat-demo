@@ -168,31 +168,15 @@ const CloudKeyPrompt = () => {
       status={status}
       action={
         <>
-          <Button variant="outlined" size="m" disabled={busy} onClick={dismissApiKeyUploadPrompt}>{t('skip')}</Button>
-          <Button variant="outlined" size="m" disabled={busy} onClick={save}>{t(busy ? 'apiKeyVerifying' : 'saveToCloud')}</Button>
+          <Button variant="outlined" size="m" disabled={busy} onClick={dismissApiKeyUploadPrompt}>
+            {t('skip')}
+          </Button>
+          <Button variant="outlined" size="m" disabled={busy} onClick={save}>
+            {t(busy ? 'apiKeyVerifying' : 'saveToCloud')}
+          </Button>
         </>
       }
-      />
-      {confirmCloudExport ? (
-        <Modal
-          title={t('cloudExportConfirmTitle')}
-          className={styles.importConfirm}
-          onClose={() => setConfirmCloudExport(false)}
-          footer={
-            <>
-              <Button variant="outlined" size="m" autoFocus onClick={() => setConfirmCloudExport(false)}>
-                {t('cancel')}
-              </Button>
-              <Button variant="dangerOutlined" size="m" onClick={confirmExportToCloud}>
-                {t('cloudExport')}
-              </Button>
-            </>
-          }
-        >
-          <div className={styles.importConfirmText}>{t('cloudExportConfirmDescription')}</div>
-        </Modal>
-      ) : null}
-    </>
+    />
   )
 }
 
@@ -594,7 +578,7 @@ const ImportHistory = ({
             size="m"
             className={styles.cellButton}
             disabled={disabled || historyImport.busy || !user}
-            onClick={() => void onCloudImport()}
+            onClick={onCloudImport}
           >
             <IconDownloadOutline16 />
             {t('cloudImport')}
@@ -688,7 +672,8 @@ const ExportHistory = ({ disabled }: { disabled: boolean }) => {
     : t('historyExportDescription')
 
   return (
-    <SettingCell
+    <>
+      <SettingCell
       label={t('exportAllLabel')}
       description={description}
       status={status}
@@ -699,7 +684,7 @@ const ExportHistory = ({ disabled }: { disabled: boolean }) => {
             size="m"
             className={styles.cellButton}
             disabled={disabled || busy || empty}
-            onClick={() => void onExport()}
+            onClick={onExport}
           >
             <IconDownloadOutline16 />
             {t('exportAllDownload')}
@@ -709,13 +694,33 @@ const ExportHistory = ({ disabled }: { disabled: boolean }) => {
             size="m"
             className={styles.cellButton}
             disabled={disabled || busy || empty || !user}
-            onClick={() => void onCloudExport()}
+            onClick={onCloudExport}
           >
             <IconUploadOutline14 />
             {t('cloudExport')}
           </Button>
         </>
       }
-    />
+      />
+      {confirmCloudExport ? (
+        <Modal
+          title={t('cloudExportConfirmTitle')}
+          className={styles.importConfirm}
+          onClose={() => setConfirmCloudExport(false)}
+          footer={
+            <>
+              <Button variant="outlined" size="m" autoFocus onClick={() => setConfirmCloudExport(false)}>
+                {t('cancel')}
+              </Button>
+              <Button variant="dangerOutlined" size="m" onClick={confirmExportToCloud}>
+                {t('cloudExport')}
+              </Button>
+            </>
+          }
+        >
+          <div className={styles.importConfirmText}>{t('cloudExportConfirmDescription')}</div>
+        </Modal>
+      ) : null}
+    </>
   )
 }
