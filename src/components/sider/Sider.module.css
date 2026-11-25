@@ -22,12 +22,28 @@
   flex-shrink: 0;
 }
 
-.appName {
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   min-width: 0;
   padding-left: 4px;
+}
+
+.brandText {
+  min-width: 0;
+}
+
+.appOperator {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  line-height: 14px;
+}
+
+.appName {
   overflow: hidden;
-  font-size: 20px;
-  line-height: 22px;
+  font-size: 16px;
+  line-height: 20px;
   font-weight: 600;
   white-space: nowrap;
   text-overflow: ellipsis;

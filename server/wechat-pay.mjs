@@ -111,7 +111,7 @@ export const createWechatNative = ({ db, config, appOrigin, fetchImpl, now }) =>
     const payload = {
       appid: config.appId,
       mchid: config.mchId,
-      description: 'Chat Demo 云备份会员（一个月）',
+      description: 'DeepSeek聊天助手 云备份会员（一个月）',
       out_trade_no: order.id,
       time_expire: new Date(order.expires_at).toISOString().replace(/\.\d{3}Z$/, '+00:00'),
       notify_url: new URL(WECHAT_PAY_NOTIFY_PATH, appOrigin).href,

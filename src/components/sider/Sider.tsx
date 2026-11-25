@@ -6,6 +6,7 @@ import { setSiderCollapsed } from '../../services/settings.js'
 import { groupSessions } from '../../services/chat/sessionGroups.js'
 import { newChat, removeSession, useChatStore } from '../../services/chat/store.js'
 import type { SessionSummary } from '../../services/chat/types.js'
+import { BrandMark } from '../base/BrandMark.js'
 import { Button } from '../base/Button.js'
 import { IconButton } from '../base/IconButton.js'
 import { Modal } from '../base/Modal.js'
@@ -53,7 +54,13 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
   return (
     <div className={clsx(styles.sider, mobile && styles.mobile)}>
       <div className={styles.top}>
-        <div className={styles.appName}>{t('appName')}</div>
+        <div className={styles.brand}>
+          <BrandMark width={24} height={18} />
+          <div className={styles.brandText}>
+            <div className={styles.appName}>{t('appName')}</div>
+            <div className={styles.appOperator}>{t('appOperatorLabel')}</div>
+          </div>
+        </div>
         <IconButton
           size="m"
           icon={<IconPanelLeftOutline16 />}
