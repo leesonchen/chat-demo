@@ -73,6 +73,11 @@ export const migrateDatabase = (db) => {
     CREATE INDEX IF NOT EXISTS membership_paid_by_user
       ON membership_orders(user_id, paid_until DESC) WHERE status = 'paid';
 
+    CREATE TABLE IF NOT EXISTS membership_trials (
+      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      expires_at INTEGER NOT NULL
+    ) STRICT;
+
     CREATE TABLE IF NOT EXISTS wechat_native_checkouts (
       order_id TEXT PRIMARY KEY REFERENCES membership_orders(id) ON DELETE CASCADE,
       expires_at INTEGER NOT NULL,
@@ -87,10 +92,24 @@ export const migrateDatabase = (db) => {
       state_hash TEXT PRIMARY KEY,
       browser_hash TEXT NOT NULL,
       verifier TEXT NOT NULL,
+      profile_session_hash TEXT,
       expires_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS delegated_wechat_attempts_expiry_idx ON delegated_wechat_attempts(expires_at);
+
+    CREATE TABLE IF NOT EXISTS mobile_wechat_attempts (
+      state_hash TEXT PRIMARY KEY,
+      browser_hash TEXT NOT NULL,
+      link_user_id TEXT,
+      pending_identity TEXT,
+      expires_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS mobile_wechat_attempts_expiry_idx ON mobile_wechat_attempts(expires_at);
   `)
+  const delegatedColumns = db.prepare('PRAGMA table_info(delegated_wechat_attempts)').all()
+  if (!delegatedColumns.some(({ name }) => name === 'profile_session_hash')) {
+    db.exec('ALTER TABLE delegated_wechat_attempts ADD COLUMN profile_session_hash TEXT')
+  }
 }
 
 export const createDatabase = (filename) => {

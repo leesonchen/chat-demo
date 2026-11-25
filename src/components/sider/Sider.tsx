@@ -1,7 +1,7 @@
 import clsx from 'clsx'
 import { useEffect, useMemo, useState } from 'react'
 import { useTranslate } from '../../i18n/index.js'
-import { IconPanelLeftOutline16, IconSettingsOutline16, NewChatIcon } from '../base/icons.js'
+import { IconDownloadOutline16, IconPanelLeftOutline16, IconSettingsOutline16, NewChatIcon } from '../base/icons.js'
 import { setSiderCollapsed } from '../../services/settings.js'
 import { groupSessions } from '../../services/chat/sessionGroups.js'
 import { newChat, removeSession, useChatStore } from '../../services/chat/store.js'
@@ -15,7 +15,11 @@ import { openSettings } from '../settings/settingsDialogState.js'
 import { closeMobileSider, useMobileSider } from './mobileSiderState.js'
 import { SessionItem } from './SessionItem.js'
 import { AccountControl } from '../account/AccountControl.js'
+import { isWechatBrowser } from '../../services/auth.js'
+import { usesAndroidFiles } from '../../services/androidFiles.js'
 import styles from './Sider.module.css'
+
+const androidApkUrl = 'https://deepseek.leeson.top/android/deepseek-chat-latest.apk'
 
 /** 展开的侧边栏：名称与收起按钮、开启新对话、按时间分组的会话列表、底部设置；移动端放在抽屉里，收起按钮关闭抽屉 */
 export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
@@ -26,6 +30,7 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
   const groups = useMemo(() => groupSessions(sessions, now, t), [sessions, now, t])
   const [deleting, setDeleting] = useState<SessionSummary | null>(null)
   const [deletePending, setDeletePending] = useState(false)
+  const [downloadsOpen, setDownloadsOpen] = useState(false)
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout>
@@ -101,6 +106,12 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
       </div>
       <div className={styles.bottom}>
         <AccountControl />
+        {!usesAndroidFiles() && (
+          <button type="button" className={styles.settings} onClick={() => setDownloadsOpen(true)}>
+            <span className={styles.settingsIcon}><IconDownloadOutline16 /></span>
+            <span className={styles.settingsLabel}>{t('appDownloads')}</span>
+          </button>
+        )}
         <button type="button" className={styles.settings} onClick={() => openSettings('general')}>
           <span className={styles.settingsIcon}>
             <IconSettingsOutline16 />
@@ -108,6 +119,21 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
           <span className={styles.settingsLabel}>{t('settings')}</span>
         </button>
       </div>
+      {downloadsOpen && (
+        <Modal title={t('appDownloads')} onClose={() => setDownloadsOpen(false)} closable>
+          <div className={styles.downloads}>
+            <a className={styles.downloadOption} href={androidApkUrl} download>
+              <span>Android</span>
+              <span className={styles.downloadAction}>{t('androidApkDownload')}</span>
+            </a>
+            <div className={styles.downloadOption} aria-disabled="true">
+              <span>iOS</span>
+              <span>{t('iosComingSoon')}</span>
+            </div>
+            {isWechatBrowser() && <p className={styles.downloadHelp}>{t('wechatDownloadHelp')}</p>}
+          </div>
+        </Modal>
+      )}
       {deleting ? (
         <Modal
           title={t('deleteSessionModalContentTitle')}

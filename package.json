@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "rspack serve -c rspack.config.ts",
     "build": "rm -rf dist && NODE_ENV=production rspack build -c rspack.config.ts",
+    "android:sync": "pnpm build && cap sync android",
     "type": "tsc -p tsconfig.json",
     "lint": "oxlint src rspack.config.ts",
     "format": "oxfmt --write .",
@@ -15,6 +16,10 @@
     "server:test": "node --experimental-sqlite --test server/test/*.test.mjs"
   },
   "dependencies": {
+    "@capacitor/android": "^8.6.2",
+    "@capacitor/app": "^8.1.2",
+    "@capacitor/core": "^8.6.2",
+    "@noble/hashes": "2.2.0",
     "@types/katex": "^0.16.5",
     "@types/mdast": "~4.0.3",
     "@types/prismjs": "^1.26.1",
@@ -32,12 +37,12 @@
     "micromark-extension-gfm": "3.0.0",
     "micromark-extension-llm-math": "3.1.0",
     "prismjs": "1.30.0",
-    "qrcode-generator": "2.0.4",
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "zustand": "4.4.7"
   },
   "devDependencies": {
+    "@capacitor/cli": "8.6.2",
     "@rspack/cli": "2.0.2",
     "@rspack/core": "2.0.2",
     "@rspack/dev-server": "2.0.1",

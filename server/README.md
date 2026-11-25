@@ -31,6 +31,8 @@ The API listens on `127.0.0.1:8091`. Configure Nginx/Caddy to serve `dist/` on y
 
 ## QR login
 
+Pages opened inside WeChat use the same Official Account to authorize the user and return to Chat Demo directly. This requires the shared auth service to support `mode=wechat_browser`.
+
 1. Click WeChat sign-in in Chat Demo to open the QR page on the shared auth service.
 2. After scanning, the computer returns to Chat Demo with a one-time sign-in code.
 3. Chat Demo verifies the browser's login state, exchanges the code using its client credentials and PKCE verifier, and starts its own session.
@@ -50,11 +52,11 @@ Back up the SQLite database and the `backups` directory together. Back up the en
 
 ## Cloud backup membership
 
-The plan is CNY 1 per calendar month. With `MEMBERSHIP_MODE=required`, the server requires a valid paid membership to upload or restore a cloud snapshot. Expiration preserves the snapshot. Local chats and local ZIP actions remain available.
+Signed-in users can start a free calendar month of cloud backup membership from Settings → Data management. The trial starts immediately, expires automatically, and can be started again after it expires. Its effective expiration date is the later of the trial expiration and any existing paid membership expiration.
 
-WeChat Native supports a one-time CNY 1 purchase. A verified provider notification or order query settles the order once and activates or extends membership. Configure the `WECHAT_PAY_*` variables in the deployment environment using files outside the repository. Start with `MEMBERSHIP_MODE=preview` for checkout verification, then use `required` to enforce membership for backup and restore. The default is `off`.
+With `MEMBERSHIP_MODE=required`, an active membership is required to upload or restore a cloud snapshot. Expiration preserves the snapshot. `preview` and `off` allow backup and restore regardless of membership status. The default is `off`. Local chats and local ZIP actions remain available.
 
-The auth service verifies identity. Chat Demo handles payment, settlement and entitlements. See the [Chinese guide](README.zh-CN.md#会员与支付) for the configuration and test procedure.
+New purchases are paused. If previously placed WeChat orders are still settling, keep the existing `WECHAT_PAY_*` configuration so the service can verify payment notifications and order status. See the [Chinese guide](README.zh-CN.md#会员与支付).
 
 ## Tests
 

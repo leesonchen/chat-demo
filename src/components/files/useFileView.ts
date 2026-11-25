@@ -1,6 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type MouseEvent } from 'react'
 import { getFileViewType, isImage } from '../../services/attachments.js'
 import { loadFile } from '../../services/chat/db.js'
+import { transferAndroidFile, usesAndroidFiles } from '../../services/androidFiles.js'
+import { showToast } from '../base/toastState.js'
 
 const createViewUrl = (original: Blob, type: string) => {
   const blob = original.slice(0, original.size, type || 'application/octet-stream')
@@ -44,6 +46,26 @@ export const useFileView = (source: File | string, name: string) => {
   const url = state?.source === source && state.type === type ? state.url : undefined
   const image = isImage(type)
   const openInTab = type === 'application/pdf' || (image && type !== 'image/svg+xml')
-  const action = openInTab ? { target: '_blank', rel: 'noreferrer' } : { download: name }
+  const openAndroidFile = async () => {
+    try {
+      const original = typeof source === 'string' ? await loadFile(source) : source
+      if (!original) {
+        throw new Error('Attachment missing')
+      }
+      await transferAndroidFile(original.slice(0, original.size, type), name, openInTab)
+    } catch {
+      showToast({ key: 'attachmentOpenFailed', type: 'error' })
+    }
+  }
+  const action = usesAndroidFiles()
+    ? {
+        onClick: (event: MouseEvent<HTMLAnchorElement>) => {
+          event.preventDefault()
+          void openAndroidFile()
+        },
+      }
+    : openInTab
+      ? { target: '_blank', rel: 'noreferrer' }
+      : { download: name }
   return { url, image, link: url ? { href: url, ...action } : undefined }
 }

@@ -51,6 +51,12 @@ API Key 和设置保存在浏览器 localStorage，会话及附件原件保存�
 
 ## 开发
 
+### Android
+
+准备 JDK 21 和 Android SDK API 36，在仓库根目录运行 `pnpm android:sync`，再用 Android Studio 打开 `android/` 或运行 `cd android && ./gradlew :app:assembleDebug`。Android 版内置 `dist/`，账号和云备份请求使用 `deepseek.leeson.top`。需要更新 Web 界面时，重新执行同步和打包。
+
+配置微信开放平台的移动应用后，Android 版的「微信登录」会直接打开微信授权，确认后返回聊天。「扫码登录已有账号」仍可用于旧账号关联。移动应用注册、签名与后端配置见[启用 Android 微信登录](server/README.zh-CN.md#启用-android-微信登录)。
+
 | 命令          | 用途                |
 | ------------- | ------------------- |
 | `pnpm dev`    | 启动开发服务器      |

@@ -6,6 +6,7 @@ import { createDatabase } from '../database.mjs'
 import { createAppServer } from '../app.mjs'
 import { sha256 } from '../security.mjs'
 import { openMembershipOrder, settleMembershipOrder } from '../membership.mjs'
+import { createWechatNative } from '../wechat-pay.mjs'
 
 const makeServer = async (options = {}) => {
   const db = createDatabase(':memory:')
@@ -26,6 +27,7 @@ const makeServer = async (options = {}) => {
       encryptionKey: key,
       secureCookies: Boolean(options.secureCookies),
       wechatAuth: options.wechatAuth,
+      wechatMobileAuth: options.wechatMobileAuth,
       wechatPay: options.wechatPay,
       membershipMode: options.membershipMode,
     },
@@ -113,6 +115,13 @@ test('cloud backup replaces one user snapshot and can be restored', async (t) =>
   assert.equal(download.status, 200)
   assert.deepEqual(Buffer.from(await download.arrayBuffer()), archive)
 
+  const inline = await fetch(`${app.baseUrl}/api/backup?inline=1`, { headers: { cookie } })
+  assert.equal(inline.status, 200)
+  assert.equal(inline.headers.get('content-disposition'), null)
+  assert.match(download.headers.get('content-disposition'), /^attachment;/)
+  assert.equal(inline.headers.get('x-backup-sha256'), sha256(archive))
+  assert.deepEqual(Buffer.from(await inline.arrayBuffer()), archive)
+
   const missingForOtherUser = await fetch(`${app.baseUrl}/api/backup/status`)
   assert.equal(missingForOtherUser.status, 401)
 })
@@ -147,6 +156,12 @@ test('only active members can backup and restore when membership is required', a
     orderId, provider: 'wechat', transactionId: 'wechat-order-1', amountFen: 100, currency: 'CNY',
   }, time)
   assert.equal((await (await get('/api/membership')).json()).tier, 'member')
+  const trialWhilePaid = await fetch(app.baseUrl + '/api/membership/trial', {
+    method: 'POST', headers: { Origin: origin, Cookie: cookie },
+  })
+  assert.equal(trialWhilePaid.status, 200)
+  assert.equal((await trialWhilePaid.json()).validUntil, new Date(paidUntil).toISOString())
+  assert.equal(app.db.prepare('SELECT count(*) AS n FROM membership_trials').get().n, 0)
   assert.equal((await upload()).status, 200)
   assert.deepEqual(Buffer.from(await (await get('/api/backup')).arrayBuffer()), zip)
 
@@ -169,6 +184,51 @@ test('preview presents the plan while allowing existing cloud backups', async t 
   assert.equal(membership.mode, 'preview')
   assert.equal(membership.tier, 'free')
   assert.equal(membership.cloudBackupAllowed, true)
+})
+
+test('free trial grants a calendar month of backup and restore access without a payment order', async t => {
+  const january = Date.parse('2026-01-31T02:00:00Z')
+  const february = Date.parse('2026-02-28T02:00:00Z')
+  let time = january
+  const app = await makeServer({ membershipMode: 'required', now: () => time })
+  t.after(app.close)
+  const cookie = `chat_demo_session=${app.token}`
+  const origin = 'http://localhost:8090'
+  const trial = headers => fetch(`${app.baseUrl}/api/membership/trial`, { method: 'POST', headers })
+  const backup = `${app.baseUrl}/api/backup`
+  const archive = Buffer.from([0x50, 0x4b, 0x03, 0x04])
+  const upload = () => fetch(backup, {
+    method: 'PUT', headers: { origin, cookie, 'Content-Type': 'application/zip' }, body: archive,
+  })
+
+  assert.equal((await trial({ origin })).status, 401)
+  assert.equal((await trial({ origin: 'https://other.example.com', cookie })).status, 403)
+  assert.equal((await upload()).status, 402)
+
+  const response = await trial({ origin, cookie })
+  assert.equal(response.status, 200)
+  const membership = await response.json()
+  assert.equal(membership.tier, 'member')
+  assert.equal(membership.validUntil, new Date(february).toISOString())
+  assert.equal(membership.paidUntil, null)
+  assert.equal(membership.cloudBackupAllowed, true)
+  assert.equal(app.db.prepare('SELECT count(*) AS n FROM membership_orders').get().n, 0)
+  assert.deepEqual(await (await trial({ origin, cookie })).json(), membership)
+  time += 7 * 24 * 60 * 60 * 1000
+  assert.deepEqual(await (await trial({ origin, cookie })).json(), membership)
+  assert.equal((await upload()).status, 200)
+  const download = await fetch(backup, { headers: { cookie } })
+  assert.equal(download.status, 200)
+  assert.deepEqual(Buffer.from(await download.arrayBuffer()), archive)
+
+  time = february
+  const { exists, membership: expired } = await (await fetch(`${backup}/status`, { headers: { cookie } })).json()
+  assert.equal(exists, true)
+  assert.equal(expired.tier, 'free')
+  assert.equal((await fetch(backup, { headers: { cookie } })).status, 402)
+  const renewed = await trial({ origin, cookie })
+  assert.equal(renewed.status, 200)
+  assert.equal((await renewed.json()).validUntil, '2026-03-28T02:00:00.000Z')
 })
 
 const appOrigin = 'http://localhost:8090'
@@ -194,6 +254,76 @@ test('WeChat login start requires its configured identity service and the app or
     method: 'POST', headers: { origin: 'https://other.example.com' },
   })
   assert.equal(crossOrigin.status, 403)
+})
+
+test('WeChat browser selects webpage authorization and cancellation consumes only its own state', async t => {
+  const app = await makeServer({ wechatAuth, fetchImpl: async () => assert.fail('A cancellation must not exchange a code') })
+  t.after(app.close)
+  const ordinary = await startLogin(app)
+  assert.equal(new URL((await ordinary.json()).authorizeUrl).searchParams.get('mode'), null)
+  const start = await fetch(app.baseUrl + '/api/auth/wechat/start', {
+    method: 'POST', headers: { Origin: appOrigin, 'User-Agent': 'Mozilla/5.0 MicroMessenger/8.0' },
+  })
+  const params = new URL((await start.json()).authorizeUrl).searchParams
+  assert.equal(params.get('mode'), 'wechat_browser')
+  const url = app.baseUrl + callbackPath + '?' + new URLSearchParams({ state: params.get('state'), error: 'access_denied' })
+  const cookie = cookiePair(start.headers.get('set-cookie'))
+  assert.equal((await fetch(url, { redirect: 'manual' })).headers.get('location'), '/?wechat_login=failed')
+  const cancelled = await fetch(url, { redirect: 'manual', headers: { Cookie: cookie } })
+  assert.equal(cancelled.headers.get('location'), '/?wechat_login=cancelled')
+  assert.match(cancelled.headers.get('set-cookie'), /Max-Age=0/)
+  assert.equal((await fetch(url, { redirect: 'manual', headers: { Cookie: cookie } })).headers.get('location'), '/?wechat_login=failed')
+})
+
+test('WeChat browser profile sync updates only the current authorized account and keeps its session', async t => {
+  let identity = { appid: wechatAuth.wechatAppId, openid: 'different-wechat' }
+  let exchanges = 0
+  const app = await makeServer({
+    wechatAuth,
+    fetchImpl: async () => {
+      exchanges++
+      return Response.json(identity)
+    },
+  })
+  t.after(app.close)
+  const timestamp = Date.now()
+  app.db.prepare(`INSERT INTO oauth_identities (id, user_id, provider, openid, created_at, updated_at)
+    VALUES (?, ?, 'wechat', 'existing-openid', ?, ?)`).run(randomUUID(), app.userId, timestamp, timestamp)
+  const signedIn = 'chat_demo_session=' + app.token
+  const start = (profile, cookie) => fetch(app.baseUrl + '/api/auth/wechat/start?profile=' + profile, {
+    method: 'POST',
+    headers: { Origin: appOrigin, 'User-Agent': 'MicroMessenger', ...(cookie && { Cookie: cookie }) },
+  })
+  const authorizeWithProfile = await start('1')
+  assert.equal(new URL((await authorizeWithProfile.json()).authorizeUrl).searchParams.get('include_profile'), '1')
+  assert.equal((await start('sync')).status, 401)
+  const callback = async ({ session = signedIn } = {}) => {
+    const response = await start('sync', signedIn)
+    assert.equal(response.status, 200)
+    const params = new URL((await response.json()).authorizeUrl).searchParams
+    assert.equal(params.get('include_profile'), '1')
+    assert.match(params.get('state'), /^profile_/)
+    const query = new URLSearchParams({ state: params.get('state'), code: 'C'.repeat(43) })
+    const cookie = [cookiePair(response.headers.get('set-cookie')), session].filter(Boolean).join('; ')
+    return fetch(app.baseUrl + callbackPath + '?' + query, { redirect: 'manual', headers: { Cookie: cookie } })
+  }
+  const getMe = async () => (await fetch(app.baseUrl + '/api/auth/me', { headers: { Cookie: signedIn } })).json()
+
+  assert.equal((await callback({ session: '' })).headers.get('location'), '/?wechat_login=profile_failed')
+  assert.equal(exchanges, 0)
+  assert.equal((await callback()).headers.get('location'), '/?wechat_login=profile_mismatch')
+  assert.equal((await getMe()).user.nickname, 'Test User')
+  assert.equal(app.db.prepare('SELECT count(*) AS count FROM users').get().count, 1)
+
+  identity = { ...identity, openid: 'existing-openid' }
+  assert.equal((await callback()).headers.get('location'), '/?wechat_login=profile_unavailable')
+  identity = { ...identity, profile: { nickname: '微信显示名', avatarUrl: 'https://thirdwx.qlogo.cn/avatar/132' } }
+  const synced = await callback()
+  assert.equal(synced.headers.get('location'), '/?wechat_login=profile_ok')
+  assert.equal(synced.headers.getSetCookie().length, 1)
+  assert.match(synced.headers.getSetCookie()[0], /^chat_demo_wechat_login=;/)
+  assert.deepEqual((await getMe()).user, { id: app.userId, ...identity.profile })
+  assert.equal(app.db.prepare('SELECT count(*) AS count FROM sessions').get().count, 1)
 })
 
 test('delegated login restores the existing account and applies only authorized profile details', async (t) => {
@@ -322,7 +452,117 @@ test('expired state and identities from another WeChat AppID do not create sessi
   assert.equal(app.db.prepare('SELECT count(*) AS count FROM sessions').get().count, 1)
 })
 
-test('WeChat Native checkout confirms only verified payments and settles each transaction once', async (t) => {
+const wechatMobileAuth = {
+  appId: 'wxabcdef0123456789',
+  appSecret: 'f'.repeat(32),
+}
+const mobilePost = (app, action, body, cookie, origin = appOrigin) => fetch(
+  app.baseUrl + '/api/auth/wechat/mobile/' + action,
+  {
+    method: 'POST',
+    headers: { Origin: origin, 'Content-Type': 'application/json', ...(cookie && { Cookie: cookie }) },
+    body: JSON.stringify(body),
+  },
+)
+const beginMobileLogin = async (app, session) => {
+  const response = await mobilePost(app, 'start', { link: Boolean(session) }, session)
+  assert.equal(response.status, 200)
+  const { state, appId } = await response.json()
+  assert.equal(appId, wechatMobileAuth.appId)
+  const browser = cookiePair(response.headers.get('set-cookie'))
+  const cookie = session ? browser + '; ' + session : browser
+  return { state, cookie }
+}
+const getSignedInUser = async (app, response) => {
+  const [session] = response.headers.getSetCookie()
+  assert.match(session, /^chat_demo_session=/)
+  const me = await fetch(app.baseUrl + '/api/auth/me', { headers: { Cookie: cookiePair(session) } })
+  return (await me.json()).user
+}
+const mobileWechat = async (url, options) => {
+  assert.equal(url.origin, 'https://api.weixin.qq.com')
+  assert.equal(options.redirect, 'error')
+  if (url.pathname === '/sns/oauth2/access_token') {
+    assert.equal(url.searchParams.get('appid'), wechatMobileAuth.appId)
+    assert.equal(url.searchParams.get('secret'), wechatMobileAuth.appSecret)
+    assert.equal(url.searchParams.get('grant_type'), 'authorization_code')
+    assert.equal(url.searchParams.get('code'), 'wechat-code')
+    return Response.json({ openid: 'mobile-openid', unionid: 'shared-unionid', access_token: 'wechat-token' })
+  }
+  assert.equal(url.pathname, '/sns/userinfo')
+  assert.equal(url.searchParams.get('openid'), 'mobile-openid')
+  return Response.json({ openid: 'mobile-openid', nickname: 'App user', headimgurl: 'https://wx.qlogo.cn/avatar/132' })
+}
+
+test('mobile authorization requires the matching browser and explicitly confirmed account creation', async t => {
+  let exchanges = 0
+  const app = await makeServer({
+    wechatMobileAuth,
+    fetchImpl: (url, options) => {
+      if (url.pathname === '/sns/oauth2/access_token') exchanges++
+      return mobileWechat(url, options)
+    },
+  })
+  t.after(app.close)
+  const me = await fetch(app.baseUrl + '/api/auth/me?client=android')
+  assert.deepEqual(await me.json(), { user: null, wechatAppLoginAvailable: true })
+  assert.equal((await mobilePost(app, 'start', {}, null, 'https://other.example.com')).status, 403)
+  assert.equal((await mobilePost(app, 'start', { link: true })).status, 401)
+  const { state, cookie } = await beginMobileLogin(app)
+  const auth = { state, code: 'wechat-code' }
+  assert.equal((await mobilePost(app, 'create', { state }, cookie)).status, 400)
+  assert.equal((await mobilePost(app, 'finish', auth)).status, 400)
+  assert.equal(exchanges, 0)
+
+  const finish = await mobilePost(app, 'finish', auth, cookie)
+  assert.deepEqual(await finish.json(), { needsAccount: true })
+  assert.deepEqual(finish.headers.getSetCookie(), [])
+  assert.equal(app.db.prepare('SELECT count(*) AS count FROM users').get().count, 1)
+  assert.equal((await mobilePost(app, 'finish', auth, cookie)).status, 400)
+
+  const created = await mobilePost(app, 'create', { state }, cookie)
+  assert.equal(created.status, 200)
+  const user = await getSignedInUser(app, created)
+  assert.notEqual(user.id, app.userId)
+  assert.equal(user.nickname, 'App user')
+  assert.equal(user.avatarUrl, 'https://wx.qlogo.cn/avatar/132')
+  assert.equal(exchanges, 1)
+  assert.equal((await mobilePost(app, 'create', { state }, cookie)).status, 400)
+
+  const next = await beginMobileLogin(app)
+  const signedIn = await mobilePost(app, 'finish', { state: next.state, code: 'wechat-code' }, next.cookie)
+  assert.equal((await getSignedInUser(app, signedIn)).id, user.id)
+})
+
+test('mobile authorization restores by verified UnionID or by explicit linking from a signed-in legacy account', async t => {
+  for (const existingUnionId of ['shared-unionid', null, 'different-wechat']) {
+    const app = await makeServer({ wechatAuth, wechatMobileAuth, fetchImpl: mobileWechat })
+    t.after(app.close)
+    const time = Date.now()
+    app.db.prepare(`INSERT INTO oauth_identities (id, user_id, provider, openid, unionid, created_at, updated_at)
+      VALUES (?, ?, 'wechat', 'official-openid', ?, ?, ?)`).run(randomUUID(), app.userId, existingUnionId, time, time)
+    const session = 'chat_demo_session=' + app.token
+    const finishLogin = ({ state, cookie }) => mobilePost(app, 'finish', { state, code: 'wechat-code' }, cookie)
+    if (existingUnionId !== 'shared-unionid') {
+      const unlinked = await finishLogin(await beginMobileLogin(app))
+      assert.deepEqual(await unlinked.json(), { needsAccount: true })
+      const expiredSession = await beginMobileLogin(app, session)
+      assert.equal((await finishLogin({ ...expiredSession, cookie: expiredSession.cookie.split(';')[0] })).status, 401)
+      const linked = await finishLogin(await beginMobileLogin(app, session))
+      if (existingUnionId === 'different-wechat') {
+        assert.equal(linked.status, 409)
+        assert.equal(app.db.prepare('SELECT count(*) AS count FROM oauth_identities').get().count, 1)
+        continue
+      }
+      assert.equal((await getSignedInUser(app, linked)).id, app.userId)
+    }
+    const restored = await finishLogin(await beginMobileLogin(app))
+    assert.equal((await getSignedInUser(app, restored)).id, app.userId)
+    assert.equal(app.db.prepare('SELECT count(*) AS count FROM users').get().count, 1)
+  }
+})
+
+test('WeChat purchases are paused and previously placed orders still settle once', async (t) => {
   const merchant = generateKeyPairSync('rsa', { modulusLength: 2048 })
   const platform = generateKeyPairSync('rsa', { modulusLength: 2048 })
   const wechatPay = {
@@ -348,49 +588,44 @@ test('WeChat Native checkout confirms only verified payments and settles each tr
   }
   let queriedTransaction
   let placements = 0
-  const app = await makeServer({
-    membershipMode: 'required',
-    wechatPay,
-    now: () => time,
-    fetchImpl: async (address, options) => {
-      const url = new URL(address)
-      assert.equal(url.origin, 'https://api.mch.weixin.qq.com')
-      const fields = Object.fromEntries(
-        [...options.headers.Authorization.matchAll(/([a-z_]+)="([^"]+)"/g)].map(([, key, val]) => [key, val]),
-      )
-      assert.equal(fields.mchid, wechatPay.mchId)
-      assert.equal(fields.serial_no, wechatPay.merchantSerial)
-      const message = `${options.method}\n${url.pathname}${url.search}\n${fields.timestamp}\n${fields.nonce_str}\n${options.body ?? ''}\n`
-      assert.ok(verify('sha256', Buffer.from(message), merchant.publicKey, Buffer.from(fields.signature, 'base64')))
-      if (options.method === 'POST') {
-        assert.equal(url.pathname, '/v3/pay/transactions/native')
-        const body = JSON.parse(options.body)
-        assert.equal(body.mchid, wechatPay.mchId)
-        assert.equal(body.appid, wechatPay.appId)
-        assert.match(body.out_trade_no, /^[a-f0-9]{32}$/)
-        assert.equal(body.notify_url, 'http://localhost:8090/api/payments/wechat/native/notify')
-        assert.deepEqual(body.amount, { total: 100, currency: 'CNY' })
-        placements++
-      } else {
-        assert.equal(url.pathname, `/v3/pay/transactions/out-trade-no/${queriedTransaction.out_trade_no}`)
-        assert.equal(url.searchParams.get('mchid'), wechatPay.mchId)
-      }
-      const body = JSON.stringify(options.method === 'POST'
-        ? { code_url: 'weixin://wxpay/s/test' } : queriedTransaction)
-      return new Response(body, { headers: responseHeaders(body) })
-    },
-  })
+  const fetchImpl = async (address, options) => {
+    const url = new URL(address)
+    assert.equal(url.origin, 'https://api.mch.weixin.qq.com')
+    const fields = Object.fromEntries(
+      [...options.headers.Authorization.matchAll(/([a-z_]+)="([^"]+)"/g)].map(([, key, val]) => [key, val]),
+    )
+    assert.equal(fields.mchid, wechatPay.mchId)
+    assert.equal(fields.serial_no, wechatPay.merchantSerial)
+    const message = `${options.method}\n${url.pathname}${url.search}\n${fields.timestamp}\n${fields.nonce_str}\n${options.body ?? ''}\n`
+    assert.ok(verify('sha256', Buffer.from(message), merchant.publicKey, Buffer.from(fields.signature, 'base64')))
+    if (options.method === 'POST') {
+      assert.equal(url.pathname, '/v3/pay/transactions/native')
+      const body = JSON.parse(options.body)
+      assert.equal(body.mchid, wechatPay.mchId)
+      assert.equal(body.appid, wechatPay.appId)
+      assert.match(body.out_trade_no, /^[a-f0-9]{32}$/)
+      assert.equal(body.notify_url, 'http://localhost:8090/api/payments/wechat/native/notify')
+      assert.deepEqual(body.amount, { total: 100, currency: 'CNY' })
+      placements++
+    } else {
+      assert.equal(url.pathname, `/v3/pay/transactions/out-trade-no/${queriedTransaction.out_trade_no}`)
+      assert.equal(url.searchParams.get('mchid'), wechatPay.mchId)
+    }
+    const body = JSON.stringify(options.method === 'POST'
+      ? { code_url: 'weixin://wxpay/s/test' } : queriedTransaction)
+    return new Response(body, { headers: responseHeaders(body) })
+  }
+  const app = await makeServer({ membershipMode: 'required', wechatPay, now: () => time, fetchImpl })
   t.after(app.close)
   const cookie = `chat_demo_session=${app.token}`
   const origin = 'http://localhost:8090'
   const startUrl = `${app.baseUrl}/api/membership/wechat/native`
   assert.equal((await fetch(startUrl, { method: 'POST', headers: { origin } })).status, 401)
   assert.equal((await fetch(startUrl, { method: 'POST', headers: { cookie } })).status, 403)
-  const start = async () => {
-    const response = await fetch(startUrl, { method: 'POST', headers: { origin, cookie } })
-    assert.equal(response.status, 200)
-    return response.json()
-  }
+  assert.equal((await fetch(startUrl, { method: 'POST', headers: { origin, cookie } })).status, 503)
+  assert.equal(placements, 0)
+  const checkout = createWechatNative({ db: app.db, config: wechatPay, appOrigin: origin, fetchImpl, now: () => time })
+  const start = () => checkout.start(app.userId)
   const [order, repeated] = await Promise.all([start(), start()])
   assert.equal(placements, 1)
   assert.deepEqual(order, repeated)

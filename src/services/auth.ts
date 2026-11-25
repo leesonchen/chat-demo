@@ -1,27 +1,13 @@
 import { create } from 'zustand'
+import { Capacitor, registerPlugin } from '@capacitor/core'
 import { setApiKey, useSettings } from './settings.js'
 
 export type AuthUser = { id: string; nickname: string; avatarUrl: string }
 type MembershipInfo = {
   tier: 'free' | 'member'
-  paidUntil: string | null
-  plan: { id: string; amountFen: number; currency: 'CNY'; interval: 'month' }
-  mode: 'off' | 'preview' | 'required'
+  validUntil: string | null
   cloudBackupAllowed: boolean
-  wechatNativeAvailable?: boolean
 }
-
-export type WechatNativeOrder = {
-  id: string
-  status: 'pending' | 'paid' | 'expired'
-  codeUrl: string | null
-  expiresAt: string
-}
-const wechatNativePath = '/api/membership/wechat/native'
-export const startWechatNativePayment = () =>
-  request<WechatNativeOrder>(wechatNativePath, { method: 'POST' })
-export const readWechatNativePayment = (id: string, refresh = false) =>
-  request<WechatNativeOrder>(`${wechatNativePath}/${id}`, { method: refresh ? 'POST' : 'GET' })
 
 export type CloudBackupInfo = {
   exists: boolean
@@ -33,10 +19,23 @@ type AuthState = {
   ready: boolean
   user: AuthUser | null
   loginBusy: boolean
+  wechatAppLoginAvailable: boolean
+  pendingWechatAccount: string | null
   needsKeyUpload: boolean
   backupInfo: CloudBackupInfo | null
 }
 const API_KEY_OWNER = 'chat-demo:api-key-owner'
+const MOBILE_WECHAT_PATH = '/api/auth/wechat/mobile'
+const NativeWechat = registerPlugin<{
+  authorize(options: { appId: string; state: string }): Promise<{
+    status: 'ok' | 'cancelled' | 'not_installed' | 'failed'
+    code?: string
+  }>
+}>('NativeWechat')
+const hasNativeWechatLogin = () =>
+  Capacitor.getPlatform() === 'android' && Capacitor.isPluginAvailable('NativeWechat')
+export const isWechatBrowser = () =>
+  !Capacitor.isNativePlatform() && /MicroMessenger/i.test(navigator.userAgent)
 const readKeyOwner = () => { try { return localStorage.getItem(API_KEY_OWNER) } catch { return null } }
 const writeKeyOwner = (userId: string | null) => {
   try {
@@ -49,20 +48,37 @@ const writeKeyOwner = (userId: string | null) => {
     // optional marker
   }
 }
-const request = async <T>(url: string, init: RequestInit = {}): Promise<T> => {
-  const response = await fetch(url, { ...init, credentials: 'same-origin', cache: 'no-store', signal: init.signal ?? AbortSignal.timeout(10000) })
-  if (!response.ok) {
-    const body = (await response.json().catch(() => null)) as { error?: { code?: string } } | null
-    throw new Error(body?.error?.code ?? `http_${response.status}`)
+const request = async <T>(url: string, init: RequestInit = {}, timeoutMs = 10_000): Promise<T> => {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const response = await fetch(url, { ...init, credentials: 'same-origin', cache: 'no-store', signal: controller.signal })
+    if (!response.ok) {
+      const body = (await response.json().catch(() => null)) as { error?: { code?: string } } | null
+      throw new Error(body?.error?.code ?? `http_${response.status}`)
+    }
+    if (response.status === 204) {
+      return undefined as T
+    }
+    return (await response.json()) as T
+  } finally {
+    clearTimeout(timer)
   }
-  if (response.status === 204) {
-    return undefined as T
-  }
-  return (await response.json()) as T
 }
 export const useAuthStore = create<AuthState>(() => ({
-  ready: false, user: null, loginBusy: false, needsKeyUpload: false, backupInfo: null,
+  ready: false, user: null, loginBusy: false, wechatAppLoginAvailable: false,
+  pendingWechatAccount: null, needsKeyUpload: false, backupInfo: null,
 }))
+
+export const startMembershipTrial = async () => {
+  const userId = useAuthStore.getState().user?.id
+  const membership = await request<MembershipInfo>('/api/membership/trial', { method: 'POST' })
+  useAuthStore.setState((state) =>
+    state.user?.id === userId && state.backupInfo
+      ? { backupInfo: { ...state.backupInfo, membership } }
+      : state
+  )
+}
 
 const loadAccountData = async (user: AuthUser) => {
   const owner = readKeyOwner()
@@ -90,8 +106,10 @@ const loadAccountData = async (user: AuthUser) => {
 }
 export const initAuth = async () => {
   try {
-    const { user } = await request<{ user: AuthUser | null }>('/api/auth/me')
-    useAuthStore.setState({ user })
+    const { user, wechatAppLoginAvailable } = await request<{ user: AuthUser | null; wechatAppLoginAvailable?: boolean }>(
+      hasNativeWechatLogin() ? '/api/auth/me?client=android' : '/api/auth/me',
+    )
+    useAuthStore.setState({ user, wechatAppLoginAvailable: wechatAppLoginAvailable === true })
     if (user) {
       await loadAccountData(user)
     }
@@ -101,10 +119,14 @@ export const initAuth = async () => {
     useAuthStore.setState({ ready: true })
   }
 }
-export const beginWechatLogin = async () => {
-  useAuthStore.setState({ loginBusy: true })
+export const beginWechatWebLogin = async (profile?: '1' | 'sync') => {
+  if (useAuthStore.getState().loginBusy) {
+    return
+  }
+  useAuthStore.setState({ loginBusy: true, pendingWechatAccount: null })
   try {
-    const { authorizeUrl } = await request<{ authorizeUrl: string }>('/api/auth/wechat/start', {
+    const startPath = profile ? `/api/auth/wechat/start?profile=${profile}` : '/api/auth/wechat/start'
+    const { authorizeUrl } = await request<{ authorizeUrl: string }>(startPath, {
       method: 'POST',
     })
     window.location.assign(authorizeUrl)
@@ -112,6 +134,61 @@ export const beginWechatLogin = async () => {
     useAuthStore.setState({ loginBusy: false })
   }
 }
+const postMobileWechat = <T>(action: string, body: object) => request<T>(`${MOBILE_WECHAT_PATH}/${action}`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(body),
+}, 15_000)
+const restoreNativeWechatSession = async () => {
+  await initAuth()
+  if (!useAuthStore.getState().user) {
+    throw new Error('wechat_login_failed')
+  }
+}
+export const beginNativeWechatLogin = async (link = false) => {
+  if (useAuthStore.getState().loginBusy) {
+    return false
+  }
+  useAuthStore.setState({ loginBusy: true, pendingWechatAccount: null })
+  try {
+    const { appId, state } = await postMobileWechat<{ appId: string; state: string }>('start', { link })
+    const result = await NativeWechat.authorize({ appId, state })
+    if (result.status === 'cancelled') {
+      return false
+    }
+    if (result.status === 'not_installed') {
+      throw new Error('wechat_not_installed')
+    }
+    if (result.status !== 'ok' || !result.code) {
+      throw new Error('wechat_login_failed')
+    }
+
+    const { needsAccount } = await postMobileWechat<{ needsAccount: boolean }>('finish', { state, code: result.code })
+    if (needsAccount) {
+      useAuthStore.setState({ pendingWechatAccount: state })
+      return false
+    }
+    await restoreNativeWechatSession()
+    return true
+  } finally {
+    useAuthStore.setState({ loginBusy: false })
+  }
+}
+export const createNativeWechatAccount = async () => {
+  const { loginBusy, pendingWechatAccount } = useAuthStore.getState()
+  if (loginBusy || !pendingWechatAccount) {
+    return false
+  }
+  useAuthStore.setState({ loginBusy: true, pendingWechatAccount: null })
+  try {
+    await postMobileWechat('create', { state: pendingWechatAccount })
+    await restoreNativeWechatSession()
+    return true
+  } finally {
+    useAuthStore.setState({ loginBusy: false })
+  }
+}
+export const dismissNativeWechatAccount = () => useAuthStore.setState({ pendingWechatAccount: null })
 export const logout = async () => {
   await request<undefined>('/api/auth/logout', { method: 'POST' })
   useAuthStore.setState({ user: null, backupInfo: null, needsKeyUpload: false })
@@ -142,12 +219,16 @@ export const saveCurrentApiKeyToCloud = async () => {
 }
 export const dismissApiKeyUploadPrompt = () => useAuthStore.setState({ needsKeyUpload: false })
 export const refreshCloudBackupInfo = async () => {
-  if (!useAuthStore.getState().user) {
+  const userId = useAuthStore.getState().user?.id
+  if (!userId) {
     useAuthStore.setState({ backupInfo: null })
     return null
   }
   try {
     const info = await request<CloudBackupInfo>('/api/backup/status')
+    if (useAuthStore.getState().user?.id !== userId) {
+      return null
+    }
     useAuthStore.setState({ backupInfo: info })
     return info
   } catch { return null }

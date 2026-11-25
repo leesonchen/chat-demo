@@ -1,0 +1,13 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">DeepSeek聊天助手</string>
+    <string name="title_activity_main">DeepSeek聊天助手</string>
+    <string name="package_name">top.leeson.deepseek.chat</string>
+    <string name="custom_url_scheme">top.leeson.deepseek.chat</string>
+    <string name="browser_unavailable">找不到可打开链接的浏览器</string>
+    <string name="close_login">返回聊天</string>
+    <string name="save_wechat_qr">保存二维码</string>
+    <string name="wechat_qr_pending">请先生成登录二维码</string>
+    <string name="wechat_qr_saved">已保存。请在微信扫一扫中从相册选择二维码。</string>
+    <string name="file_save_error">无法保存文件，请重试</string>
+</resources>

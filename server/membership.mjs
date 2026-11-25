@@ -27,13 +27,28 @@ const lastPaidPeriod = (db, userId) => db.prepare(`
 
 export const membershipStatus = (db, userId, now, mode) => {
   const { paid_until: paidUntil } = lastPaidPeriod(db, userId) ?? {}
+  const { expires_at: trialUntil } = db.prepare('SELECT expires_at FROM membership_trials WHERE user_id = ?').get(userId) ?? {}
+  const validUntil = Math.max(paidUntil ?? 0, trialUntil ?? 0)
   return {
-    tier: paidUntil > now ? 'member' : 'free',
+    tier: validUntil > now ? 'member' : 'free',
     paidUntil: paidUntil ? new Date(paidUntil).toISOString() : null,
+    validUntil: validUntil ? new Date(validUntil).toISOString() : null,
     plan: MONTHLY_MEMBERSHIP,
     mode,
-    cloudBackupAllowed: mode !== 'required' || paidUntil > now,
+    cloudBackupAllowed: mode !== 'required' || validUntil > now,
   }
+}
+
+export const grantMembershipTrial = (db, userId, now) => {
+  const expiresAt = nextMonth(now, localDate(now).getUTCDate())
+  db.prepare(`
+    INSERT INTO membership_trials (user_id, expires_at)
+    SELECT ?, ? WHERE NOT EXISTS (
+      SELECT 1 FROM membership_orders WHERE user_id = ? AND status = 'paid' AND paid_until > ?
+    )
+    ON CONFLICT(user_id) DO UPDATE SET expires_at = excluded.expires_at
+      WHERE membership_trials.expires_at <= ?
+  `).run(userId, expiresAt, userId, now, now)
 }
 
 export const openMembershipOrder = (db, userId, provider, now) => {

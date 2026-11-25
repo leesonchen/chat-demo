@@ -36,6 +36,16 @@ const readWechatAuth = () => {
   return { origin, clientId, clientSecret, wechatAppId }
 }
 const wechatAuth = readWechatAuth()
+const readWechatMobileAuth = () => {
+  const { WECHAT_MOBILE_APP_ID: appId, WECHAT_MOBILE_APP_SECRET: appSecret } = process.env
+  if (!appId && !appSecret) return null
+  if (!/^wx[a-f0-9]{16}$/i.test(appId ?? '') || !/^[a-f0-9]{32}$/i.test(appSecret ?? '') ||
+      appId.toLowerCase() === wechatAuth?.wechatAppId.toLowerCase()) {
+    throw new Error('WeChat mobile login needs a separate WECHAT_MOBILE_APP_ID and WECHAT_MOBILE_APP_SECRET')
+  }
+  return { appId, appSecret }
+}
+const wechatMobileAuth = readWechatMobileAuth()
 const membershipMode = process.env.MEMBERSHIP_MODE ?? 'off'
 if (!['off', 'preview', 'required'].includes(membershipMode)) {
   throw new Error('MEMBERSHIP_MODE must be off, preview, or required')
@@ -51,6 +61,7 @@ const server = createAppServer({
     encryptionKey,
     secureCookies: production,
     wechatAuth,
+    wechatMobileAuth,
     membershipMode,
     wechatPay,
   },

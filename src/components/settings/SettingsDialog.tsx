@@ -1,5 +1,5 @@
 import clsx from 'clsx'
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   IconDarkOutline16,
   IconDataOutline16,
@@ -16,7 +16,6 @@ import {
   exportHistory,
   importHistory,
 } from '../../services/chat/backup.js'
-import type { ImportProgressCallback } from '../../services/chat/history/importArchive.js'
 import { useIsMobile } from '../../app/viewport.js'
 import { useChatStore } from '../../services/chat/store.js'
 import { regionCodes, getRegionName, provinces } from '../../services/location.js'
@@ -36,15 +35,14 @@ import { Select } from '../base/Select.js'
 import { showToast } from '../base/toastState.js'
 import {
   dismissApiKeyUploadPrompt,
-  readWechatNativePayment,
   refreshCloudBackupInfo,
   saveCurrentApiKeyToCloud,
-  startWechatNativePayment,
+  startMembershipTrial,
   useAuthStore,
-  type WechatNativeOrder,
 } from '../../services/auth.js'
-import qrcode from 'qrcode-generator'
-import { exportHistoryToServer, importHistoryFromServer } from '../../services/cloudBackup.js'
+import { exportHistoryToServer, prepareCloudBackup, type BackupDownloadProgress } from '../../services/cloudBackup.js'
+import { formatSize } from '../../services/attachments.js'
+import { transferAndroidFile, usesAndroidFiles } from '../../services/androidFiles.js'
 import { ApiKeyConfirm, ApiKeyField, useApiKeyEditor } from './ApiKeyField.js'
 import { closeSettings, useSettingsDialog, type SettingsSection } from './settingsDialogState.js'
 import styles from './Settings.module.css'
@@ -104,7 +102,12 @@ const SettingsContent = ({
               role="tab"
               aria-selected={section === item.value}
               className={clsx(styles.navItem, section === item.value && styles.navItemActive)}
-              onClick={() => setSection(item.value)}
+              onClick={() => {
+                if (item.value !== 'data') {
+                  historyImport.cancelCloud()
+                }
+                setSection(item.value)
+              }}
             >
               {item.icon}
               {t(item.label)}
@@ -477,6 +480,18 @@ const cloudErrorStatus = (key: TranslationKey, error: unknown): Status => {
   if (error instanceof Error && error.message === 'backup_not_found') {
     return { key: 'cloudBackupMissing', error: true }
   }
+  if (error instanceof Error && error.message === 'authentication_required') {
+    return { key: 'cloudBackupAuthRequired', error: true }
+  }
+  if (error instanceof Error && error.message === 'backup_too_large') {
+    return { key, reason: 'cloudBackupTooLarge', error: true }
+  }
+  if (error instanceof TypeError) {
+    return { key, reason: 'cloudBackupInterrupted', error: true }
+  }
+  if (error instanceof Error && error.message.startsWith('http_')) {
+    return { key, reason: 'cloudBackupServiceUnavailable', error: true }
+  }
   return errorStatus(key, error)
 }
 
@@ -511,134 +526,91 @@ const SettingCell = ({
   )
 }
 
-const WechatNativePayment = ({ amount }: { amount: string }) => {
+const CloudMembership = () => {
   const t = useTranslate()
-  const [order, setOrder] = useState<WechatNativeOrder | null>(null)
+  const membership = useAuthStore((state) => state.backupInfo?.membership)
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState(false)
-  const codeUrl = order?.codeUrl
-  const qr = useMemo(() => {
-    if (!codeUrl) {
-      return null
-    }
-    const code = qrcode(0, 'M')
-    code.addData(codeUrl)
-    code.make()
-    return code.createDataURL(5, 20)
-  }, [codeUrl])
-
+  const [status, setStatus] = useState<Status>(null)
   useEffect(() => {
-    if (order?.status !== 'pending') {
-      return
-    }
-    let active = true
-    let timer: number
-    const check = async () => {
-      try {
-        const current = await readWechatNativePayment(order.id)
-        if (!active) {
-          return
-        }
-        if (current.status !== 'pending') {
-          setOrder(previous => previous?.status === 'paid' ? previous : current)
-          setError(false)
-          return
-        }
-      } catch {
-        // Keep polling local status after a transient loss of connectivity.
-      }
-      if (active) {
-        timer = window.setTimeout(check, 2500)
-      }
-    }
-    timer = window.setTimeout(check, 2500)
-    return () => {
-      active = false
-      window.clearTimeout(timer)
-    }
-  }, [order])
+    void refreshCloudBackupInfo()
+  }, [])
+  if (!membership) {
+    return null
+  }
 
-  useEffect(() => {
-    if (order?.status === 'paid') {
-      void refreshCloudBackupInfo()
-    }
-  }, [order?.status])
-
-  const manageOrder = async (refresh: boolean) => {
+  const { tier, validUntil } = membership
+  const beginTrial = async () => {
     setBusy(true)
-    setError(false)
+    setStatus(null)
     try {
-      const current = refresh && order
-        ? await readWechatNativePayment(order.id, true)
-        : await startWechatNativePayment()
-      setOrder(previous => refresh && previous?.status === 'paid' ? previous : current)
+      await startMembershipTrial()
     } catch {
-      setError(true)
+      setStatus({ key: 'cloudMembershipTrialFailed', error: true })
     } finally {
       setBusy(false)
     }
   }
 
   return (
-    <div className={styles.wechatPayment}>
-      <p>{t('cloudMembershipOneTime', { amount })}</p>
-      {qr && (
-        <img className={styles.wechatPaymentCode} src={qr} alt={t('cloudMembershipScanWechat')} />
-      )}
-      <div aria-live="polite">
-        {order?.status === 'pending' && t('cloudMembershipScanWechat')}
-        {order?.status === 'expired' && t('cloudMembershipPaymentExpired')}
-        {order?.status === 'paid' && t('cloudMembershipPaymentPaid')}
-        {error && <div className={styles.error}>{t('cloudMembershipPaymentError')}</div>}
-      </div>
-      <div className={styles.wechatPaymentActions}>
-        {order?.status !== 'pending' && (
-          <Button size="m" variant="outlined" disabled={busy} onClick={() => void manageOrder(false)}>
-            {t('cloudMembershipPayWechat')}
+    <SettingCell
+      label={t(tier === 'member' ? 'cloudMembershipActive' : 'cloudMembershipFree')}
+      description={
+        tier === 'member' && validUntil
+          ? t('cloudMembershipValidUntil', { date: new Date(validUntil).toLocaleString() })
+          : t('cloudMembershipTrialDescription')
+      }
+      status={status}
+      action={
+        tier === 'free' && (
+          <Button
+            size="m"
+            variant="outlined"
+            className={styles.cellButton}
+            disabled={busy}
+            aria-busy={busy}
+            onClick={() => void beginTrial()}
+          >
+            {t('cloudMembershipStartTrial')}
           </Button>
-        )}
-        {order && order.status !== 'paid' && (
-          <Button size="m" variant="outlined" disabled={busy} onClick={() => void manageOrder(true)}>
-            {t('cloudMembershipCheckWechatPayment')}
-          </Button>
-        )}
-      </div>
-    </div>
+        )
+      }
+    />
   )
 }
 
-const CloudMembership = () => {
-  const t = useTranslate()
-  const membership = useAuthStore((state) => state.backupInfo?.membership)
-  const userId = useAuthStore((state) => state.user?.id)
-  if (!membership || membership.mode === 'off') {
-    return null
-  }
-  const { tier, paidUntil, plan, wechatNativeAvailable } = membership
-  const amount = (plan.amountFen / 100).toString()
-  return (
-    <>
-      <SettingCell
-        label={t(tier === 'member' ? 'cloudMembershipActive' : 'cloudMembershipFree')}
-        description={tier === 'member' && paidUntil
-          ? t('cloudMembershipPaidUntil', { date: new Date(paidUntil).toLocaleString() })
-          : wechatNativeAvailable ? t('cloudMembershipRequired') : t('cloudMembershipPlanUnavailable', { amount })}
-        status={null}
-        action={null}
-      />
-      {wechatNativeAvailable && <WechatNativePayment key={userId} amount={amount} />}
-    </>
-  )
-}
+type CloudRestore = { phase: 'downloading'; progress: BackupDownloadProgress } | { phase: 'ready' }
+type CloudRestoreTask = { controller: AbortController; userId: string; file?: File }
 
-/** 选文件后先提示覆盖；确认后才检查文件并执行导入，任何错误都提示导入失败。 */
 const useHistoryImport = () => {
   const [file, setFile] = useState<File | null>(null)
   const [progress, setProgress] = useState<{ processed: number; total?: number } | null>(null)
   const [status, setStatus] = useState<Status>(null)
+  const [cloud, setCloud] = useState<CloudRestore | null>(null)
   const importing = useRef(false)
+  const cloudTask = useRef<CloudRestoreTask | null>(null)
 
-  const runImport = async (task: (onProgress: ImportProgressCallback) => Promise<number>, failureKey: TranslationKey) => {
+  const cancelCloud = useCallback(() => {
+    if (!cloudTask.current) {
+      return
+    }
+    cloudTask.current.controller.abort()
+    cloudTask.current = null
+    setCloud(null)
+  }, [])
+  useEffect(() => {
+    const unsubscribe = useAuthStore.subscribe((current, previous) => {
+      if (current.user?.id !== previous.user?.id) {
+        cancelCloud()
+      }
+    })
+    return () => {
+      unsubscribe()
+      cloudTask.current?.controller.abort()
+      cloudTask.current = null
+    }
+  }, [cancelCloud])
+
+  const runImport = async (selected: File, fromCloud = false) => {
     if (importing.current) {
       return
     }
@@ -647,14 +619,10 @@ const useHistoryImport = () => {
     setProgress({ processed: 0 })
     setStatus(null)
     try {
-      const count = await task((processed, total) => setProgress({ processed, total }))
+      const count = await importHistory(selected, (processed, total) => setProgress({ processed, total }))
       setStatus({ key: count === 1 ? 'historyImportedOne' : 'historyImported', params: { count } })
     } catch (error) {
-      if (failureKey === 'cloudImportFailed') {
-        setStatus(cloudErrorStatus(failureKey, error))
-      } else {
-        setStatus({ key: failureKey, error: true })
-      }
+      setStatus(fromCloud ? cloudErrorStatus('cloudImportFailed', error) : { key: 'historyImportFailed', error: true })
     } finally {
       importing.current = false
       setProgress(null)
@@ -664,24 +632,69 @@ const useHistoryImport = () => {
     if (!file) {
       return Promise.resolve()
     }
-    const selected = file
-    return runImport((onProgress) => importHistory(selected, onProgress), 'historyImportFailed')
+    return runImport(file)
   }
-  const importFromServer = () => runImport(importHistoryFromServer, 'cloudImportFailed')
+
+  const startCloud = async () => {
+    const userId = useAuthStore.getState().user?.id
+    if (!userId || file || cloudTask.current || importing.current) {
+      return
+    }
+    const task: CloudRestoreTask = { controller: new AbortController(), userId }
+    cloudTask.current = task
+    setStatus(null)
+    setCloud({ phase: 'downloading', progress: { received: 0 } })
+    try {
+      const prepared = await prepareCloudBackup(task.controller.signal, (download) => {
+        if (cloudTask.current === task) {
+          setCloud({ phase: 'downloading', progress: download })
+        }
+      })
+      if (cloudTask.current === task) {
+        task.file = prepared
+        setCloud({ phase: 'ready' })
+      }
+    } catch (error) {
+      if (cloudTask.current === task) {
+        cloudTask.current = null
+        setCloud(null)
+        setStatus(cloudErrorStatus('cloudImportFailed', error))
+        void refreshCloudBackupInfo()
+      }
+    }
+  }
+  const confirmCloud = () => {
+    const task = cloudTask.current
+    if (!task?.file || task.userId !== useAuthStore.getState().user?.id) {
+      cancelCloud()
+      return
+    }
+    cloudTask.current = null
+    setCloud(null)
+    void runImport(task.file, true)
+  }
 
   return {
     file,
-    busy: progress !== null,
+    busy: progress !== null || cloud !== null,
     progress,
     status,
-    select: setFile,
+    cloud,
+    select: (selected: File) => {
+      if (!cloudTask.current && !importing.current) {
+        setFile(selected)
+      }
+    },
     cancel: () => setFile(null),
     dismiss: () => {
       setFile(null)
       setStatus(null)
+      cancelCloud()
     },
     confirm,
-    importFromServer,
+    startCloud,
+    cancelCloud,
+    confirmCloud,
   }
 }
 
@@ -695,10 +708,9 @@ const ImportHistory = ({
 }) => {
   const t = useTranslate()
   const inputRef = useRef<HTMLInputElement>(null)
-  const { progress } = historyImport
+  const { cloud, progress } = historyImport
   const user = useAuthStore((state) => state.user)
   const backupInfo = useAuthStore((state) => state.backupInfo)
-  const [confirmCloudImport, setConfirmCloudImport] = useState(false)
   const cloudDescription = backupInfo
     ? backupInfo.exists
       ? t('cloudBackupAvailable', { date: new Date(backupInfo.updatedAt ?? '').toLocaleString() })
@@ -707,31 +719,32 @@ const ImportHistory = ({
 
   const cloudAllowed = backupInfo?.membership?.cloudBackupAllowed !== false
   const canRestore = Boolean(user && backupInfo?.exists) && cloudAllowed && !disabled && !historyImport.busy
-  const confirmImportFromCloud = () => {
-    setConfirmCloudImport(false)
-    if (canRestore) {
-      historyImport.importFromServer().finally(() => refreshCloudBackupInfo())
-    }
-  }
+  const download = cloud?.phase === 'downloading' ? cloud.progress : null
 
   return (
     <>
       <SettingCell
-        className={progress ? styles.importing : undefined}
+        className={progress || download ? styles.importing : undefined}
         label={t('historyImport')}
         description={cloudAllowed ? cloudDescription : t('cloudMembershipRequired')}
         status={historyImport.status}
         action={
           <>
-            <Button
-              variant="outlined"
-              size="m"
-              className={styles.cellButton}
-              disabled={!canRestore}
-              onClick={() => setConfirmCloudImport(true)}
-            >
-              {t('cloudImport')}
-            </Button>
+            {download ? (
+              <Button variant="outlined" size="m" className={styles.cellButton} onClick={historyImport.cancelCloud}>
+                {t('cloudBackupCancelDownload')}
+              </Button>
+            ) : (
+              <Button
+                variant="outlined"
+                size="m"
+                className={styles.cellButton}
+                disabled={!canRestore}
+                onClick={() => void historyImport.startCloud()}
+              >
+                {t(historyImport.status?.key === 'cloudImportFailed' ? 'retry' : 'cloudImport')}
+              </Button>
+            )}
             <Button
               variant="outlined"
               size="m"
@@ -763,6 +776,19 @@ const ImportHistory = ({
                 }
               }}
             />
+            {download && (
+              <div className={styles.cloudDownload}>
+                <span role="status">{t(download.retrying ? 'cloudBackupRetrying' : 'cloudBackupDownloading')}</span>
+                <div className={styles.importProgress}>
+                  <progress
+                    aria-label={t('cloudBackupDownloading')}
+                    max={download.total}
+                    value={download.total === undefined ? undefined : Math.min(download.received, download.total)}
+                  />
+                  <span>{formatSize(download.received)}{download.total && ` / ${formatSize(download.total)}`}</span>
+                </div>
+              </div>
+            )}
             {progress?.total !== undefined && (
               <div className={styles.importProgress}>
                 <div
@@ -787,17 +813,17 @@ const ImportHistory = ({
           </>
         }
       />
-      {confirmCloudImport ? (
+      {cloud?.phase === 'ready' ? (
         <Modal
           title={t('cloudImportConfirmTitle')}
           className={styles.importConfirm}
-          onClose={() => setConfirmCloudImport(false)}
+          onClose={historyImport.cancelCloud}
           footer={
             <>
-              <Button variant="outlined" size="m" autoFocus onClick={() => setConfirmCloudImport(false)}>
+              <Button variant="outlined" size="m" autoFocus onClick={historyImport.cancelCloud}>
                 {t('cancel')}
               </Button>
-              <Button variant="dangerOutlined" size="m" onClick={confirmImportFromCloud}>
+              <Button variant="dangerOutlined" size="m" onClick={historyImport.confirmCloud}>
                 {t('cloudImport')}
               </Button>
             </>
@@ -825,6 +851,10 @@ const ExportHistory = ({ disabled }: { disabled: boolean }) => {
     setStatus(null)
     try {
       const { name, blob } = await exportHistory()
+      if (usesAndroidFiles()) {
+        await transferAndroidFile(blob, name)
+        return
+      }
       const url = URL.createObjectURL(blob)
       const link = document.createElement('a')
       link.href = url

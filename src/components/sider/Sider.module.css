@@ -186,6 +186,45 @@
   color: var(--dsw-alias-label-primary);
 }
 
+.downloads {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.downloadOption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  color: var(--dsw-alias-label-primary);
+  font-size: 14px;
+  text-decoration: none;
+}
+
+a.downloadOption:hover {
+  background-color: var(--dsw-specific-sidebar-nav-item-hover);
+}
+
+.downloadAction {
+  color: var(--dsw-alias-brand-primary);
+}
+
+.downloadOption[aria-disabled="true"],
+.downloadHelp {
+  color: var(--dsw-alias-label-secondary);
+}
+
+.downloadHelp {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 18px;
+}
+
 .collapsed {
   position: absolute;
   top: 0;

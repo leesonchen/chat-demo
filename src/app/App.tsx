@@ -73,7 +73,7 @@ export const App = () => {
     initChat()
     const currentUrl = new URL(window.location.href)
     const loginResult = currentUrl.searchParams.get('wechat_login')
-    if (loginResult === 'ok' || loginResult === 'failed') {
+    if (loginResult && ['ok', 'failed', 'cancelled', 'profile_ok', 'profile_failed', 'profile_unavailable', 'profile_mismatch'].includes(loginResult)) {
       currentUrl.searchParams.delete('wechat_login')
       window.history.replaceState(window.history.state, '', currentUrl)
     }
@@ -89,6 +89,14 @@ export const App = () => {
         }
       } else if (loginResult === 'failed' || loginResult === 'ok') {
         showToast({ key: 'wechatLoginFailed', type: 'error' })
+      } else if (loginResult === 'profile_ok' && user) {
+        showToast({ key: 'wechatProfileSynced' })
+      } else if (loginResult === 'profile_unavailable') {
+        showToast({ key: 'wechatProfileUnavailable', type: 'error' })
+      } else if (loginResult === 'profile_mismatch') {
+        showToast({ key: 'wechatProfileMismatch', type: 'error' })
+      } else if (loginResult === 'profile_failed' || loginResult === 'profile_ok') {
+        showToast({ key: 'wechatProfileSyncFailed', type: 'error' })
       }
       ensureApiKey()
     })

@@ -27,6 +27,27 @@
 .accountButton:hover,
 .loginButton:hover { background-color: var(--dsw-specific-sidebar-nav-item-hover); }
 .loginButton:disabled { opacity: .55; cursor: default; }
+.signIn { width: 100%; }
+.loginOptions {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 12px;
+  padding: 0 8px 0 45px;
+}
+.loginOptions button {
+  min-height: 36px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.loginOptions button:hover { text-decoration: underline; }
+.loginOptions button:disabled,
+.menu button:disabled { opacity: .55; cursor: default; }
 .avatar {
   display: flex;
   align-items: center;
