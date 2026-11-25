@@ -35,7 +35,7 @@ The API listens on `127.0.0.1:8091`. Configure Nginx/Caddy to serve `dist/` on y
 2. After scanning, the computer returns to Chat Demo with a one-time sign-in code.
 3. Chat Demo verifies the browser's login state, exchanges the code using its client credentials and PKCE verifier, and starts its own session.
 
-Chat Demo checks the returned AppID before matching the OpenID to an existing account. Its account details, API Key, and cloud backup are associated with that same account. The shared service supplies identity only. Chat Demo displays profile details already stored on an existing account.
+Chat Demo checks the returned AppID before matching the OpenID to an existing account. Its account details, API Key, and cloud backup are associated with that same account. Enable the optional profile permission for this client in the shared auth service. Users can opt in on the QR page. Chat Demo saves the nickname and avatar supplied with an authorized sign-in and preserves existing profile details when the reply contains identity only.
 
 ## Data and behavior
 

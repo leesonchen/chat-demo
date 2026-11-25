@@ -139,9 +139,10 @@ test('WeChat login start requires its configured identity service and the app or
   assert.equal(crossOrigin.status, 403)
 })
 
-test('delegated login restores the existing account, profile, API Key and cloud backup', async (t) => {
+test('delegated login restores the existing account and applies only authorized profile details', async (t) => {
   let authorize
   let exchanged = 0
+  let profile
   const code = 'C'.repeat(43)
   const app = await makeServer({
     wechatAuth,
@@ -157,7 +158,7 @@ test('delegated login restores the existing account, profile, API Key and cloud 
       assert.equal(body.redirect_uri, appOrigin + callbackPath)
       assert.equal(createHash('sha256').update(body.code_verifier).digest('base64url'),
         authorize.searchParams.get('code_challenge'))
-      return Response.json({ appid: wechatAuth.wechatAppId, openid: 'existing-openid' })
+      return Response.json({ appid: wechatAuth.wechatAppId, openid: 'existing-openid', profile })
     },
   })
   t.after(app.close)
@@ -215,6 +216,18 @@ test('delegated login restores the existing account, profile, API Key and cloud 
   assert.deepEqual(Buffer.from(await (await get('/api/backup')).arrayBuffer()), backup)
   assert.equal(app.db.prepare('SELECT count(*) AS count FROM users').get().count, 1)
   assert.equal(app.db.prepare('SELECT unionid FROM oauth_identities').get().unionid, 'old-unionid')
+
+  profile = { nickname: '更新后的昵称', avatarUrl: 'https://other.example.com/image.png' }
+  const nextStart = await startLogin(app)
+  authorize = new URL((await nextStart.json()).authorizeUrl)
+  const next = await callback(cookiePair(nextStart.headers.get('set-cookie')), authorize.searchParams.get('state'))
+  assert.equal(next.headers.get('location'), '/?wechat_login=ok')
+  const nextSession = cookiePair(next.headers.getSetCookie()[0])
+  const updated = await fetch(app.baseUrl + '/api/auth/me', { headers: { Cookie: nextSession } })
+  assert.deepEqual(await updated.json(), {
+    user: { id: app.userId, nickname: profile.nickname, avatarUrl: avatar },
+  })
+  assert.equal(app.db.prepare('SELECT count(*) AS count FROM users').get().count, 1)
 })
 
 test('expired state and identities from another WeChat AppID do not create sessions', async (t) => {

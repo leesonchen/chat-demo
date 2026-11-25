@@ -78,7 +78,19 @@ const beginWechatLogin = (res, config, db, time) => {
   })
 }
 
-const issueWechatSession = (db, openid, time) => {
+const readDisplayProfile = profile => {
+  const nickname = typeof profile?.nickname === 'string'
+    ? Array.from(profile.nickname.trim()).slice(0, 80).join('')
+    : ''
+  const avatar = typeof profile?.avatarUrl === 'string' && profile.avatarUrl.length <= 2048
+    ? URL.parse(profile.avatarUrl)
+    : null
+  const avatarUrl = avatar?.protocol === 'https:' && !avatar.username && !avatar.password && !avatar.port &&
+    ['thirdwx.qlogo.cn', 'wx.qlogo.cn'].includes(avatar.hostname) ? avatar.href : ''
+  return { nickname, avatarUrl }
+}
+
+const issueWechatSession = (db, openid, profile, time) => {
   const sessionToken = loginToken()
   db.exec('BEGIN IMMEDIATE')
   try {
@@ -92,12 +104,16 @@ const issueWechatSession = (db, openid, time) => {
     }
     const userId = identity?.user_id ?? randomUUID()
     if (!identity) {
-      db.prepare("INSERT INTO users (id, nickname, created_at, updated_at) VALUES (?, '微信用户', ?, ?)")
-        .run(userId, time, time)
+      db.prepare('INSERT INTO users (id, nickname, avatar_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
+        .run(userId, profile.nickname || '微信用户', profile.avatarUrl, time, time)
       db.prepare("INSERT INTO oauth_identities (id, user_id, provider, openid, created_at, updated_at) VALUES (?, ?, 'wechat', ?, ?, ?)")
         .run(randomUUID(), userId, openid, time, time)
     } else {
-      db.prepare('UPDATE users SET updated_at = ? WHERE id = ?').run(time, userId)
+      db.prepare(`
+        UPDATE users SET nickname = COALESCE(NULLIF(?, ''), nickname),
+          avatar_url = COALESCE(NULLIF(?, ''), avatar_url), updated_at = ?
+        WHERE id = ?
+      `).run(profile.nickname, profile.avatarUrl, time, userId)
       db.prepare("UPDATE oauth_identities SET updated_at = ? WHERE provider = 'wechat' AND openid = ?")
         .run(time, openid)
     }
@@ -156,7 +172,7 @@ const wechatCallback = async (req, res, url, { db, config, fetchImpl, now }) => 
         !/^[A-Za-z0-9_-]{1,128}$/.test(identity.openid)) {
       throw new Error('Unexpected WeChat identity')
     }
-    const sessionToken = issueWechatSession(db, identity.openid, now())
+    const sessionToken = issueWechatSession(db, identity.openid, readDisplayProfile(identity.profile), now())
     process.stdout.write('[chat-demo-server] delegated WeChat login succeeded\n')
     return returnFromLogin(res, 'ok', [setCookie(sessionToken, config.secureCookies), clearLogin])
   } catch {
