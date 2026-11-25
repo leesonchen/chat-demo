@@ -54,36 +54,14 @@ export const migrateDatabase = (db) => {
       updated_at INTEGER NOT NULL
     );
 
-    CREATE TABLE IF NOT EXISTS wechat_login_attempts (
-      ticket_hash TEXT PRIMARY KEY,
-      poll_secret_hash TEXT NOT NULL,
-      state_hash TEXT NOT NULL UNIQUE,
-      include_profile INTEGER NOT NULL DEFAULT 0 CHECK (include_profile IN (0, 1)),
-      status TEXT NOT NULL DEFAULT 'pending',
-      user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
-      expires_at INTEGER NOT NULL,
-      created_at INTEGER NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS wechat_login_attempts_expiry_idx ON wechat_login_attempts(expires_at);
-
-    CREATE TABLE IF NOT EXISTS oauth_states (
+    CREATE TABLE IF NOT EXISTS delegated_wechat_attempts (
       state_hash TEXT PRIMARY KEY,
-      expires_at INTEGER NOT NULL,
-      created_at INTEGER NOT NULL
+      browser_hash TEXT NOT NULL,
+      verifier TEXT NOT NULL,
+      expires_at INTEGER NOT NULL
     );
-    CREATE INDEX IF NOT EXISTS oauth_states_expiry_idx ON oauth_states(expires_at);
+    CREATE INDEX IF NOT EXISTS delegated_wechat_attempts_expiry_idx ON delegated_wechat_attempts(expires_at);
   `)
-
-  const columns = db.prepare('PRAGMA table_info(wechat_login_attempts)').all()
-  if (!columns.some(({ name }) => name === 'include_profile')) {
-    db.exec('ALTER TABLE wechat_login_attempts ADD COLUMN include_profile INTEGER NOT NULL DEFAULT 0 CHECK (include_profile IN (0, 1))')
-  }
-
-  const separateProfileFlow = db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'wechat_profile_attempts'").get()
-  if (separateProfileFlow) {
-    // Retire unclaimed QR codes from the previous, signed-in-only profile flow.
-    db.exec('DELETE FROM wechat_login_attempts WHERE ticket_hash IN (SELECT ticket_hash FROM wechat_profile_attempts)')
-  }
 }
 
 export const createDatabase = (filename) => {

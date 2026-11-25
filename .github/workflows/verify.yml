@@ -2,7 +2,7 @@ name: Verify
 
 on:
   push:
-    branches: [main, feat/cloud-account-backup-v1]
+    branches: [main, dev, feat/cloud-account-backup-v1]
   pull_request:
 
 permissions:

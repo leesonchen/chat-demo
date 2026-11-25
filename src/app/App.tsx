@@ -1,7 +1,7 @@
 import { useEffect } from 'react'
 import { useTranslate } from '../i18n/index.js'
 import { useSettings } from '../services/settings.js'
-import { initAuth } from '../services/auth.js'
+import { initAuth, useAuthStore } from '../services/auth.js'
 import { useIsMobile, useMobileViewport, usePreventPageScroll } from './viewport.js'
 import {
   bindChatPersistence,
@@ -15,7 +15,7 @@ import { closeSearchPanel } from '../components/search/searchPanelState.js'
 import { SessionView } from '../components/session/SessionView.js'
 import { MobileHeader } from '../components/session/MobileHeader.js'
 import { Welcome } from '../components/session/Welcome.js'
-import { ensureApiKey } from '../components/settings/settingsDialogState.js'
+import { ensureApiKey, openSettings } from '../components/settings/settingsDialogState.js'
 import { SettingsDialog } from '../components/settings/SettingsDialog.js'
 import { Toast } from '../components/base/Toast.js'
 import { showToast } from '../components/base/toastState.js'
@@ -70,8 +70,27 @@ export const App = () => {
 
   useEffect(() => {
     initChat()
-    // Restore the signed-in account and its API Key before prompting for a missing key.
-    initAuth().finally(() => ensureApiKey())
+    const currentUrl = new URL(window.location.href)
+    const loginResult = currentUrl.searchParams.get('wechat_login')
+    if (loginResult === 'ok' || loginResult === 'failed') {
+      currentUrl.searchParams.delete('wechat_login')
+      window.history.replaceState(window.history.state, '', currentUrl)
+    }
+
+    // Restore the account's API Key before prompting to add or upload one.
+    initAuth().finally(() => {
+      const { user, needsKeyUpload } = useAuthStore.getState()
+      if (loginResult === 'ok' && user) {
+        showToast({ key: 'wechatLoggedIn' })
+        if (needsKeyUpload) {
+          openSettings('data')
+          return
+        }
+      } else if (loginResult === 'failed' || loginResult === 'ok') {
+        showToast({ key: 'wechatLoginFailed', type: 'error' })
+      }
+      ensureApiKey()
+    })
   }, [])
 
   return (

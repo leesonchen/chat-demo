@@ -2,12 +2,9 @@
 
 本服务为 chat-demo 提供微信服务号扫码登录、账号 API Key 保存和手动聊天记录云端备份。未部署服务端时，原有本地聊天功能仍可独立使用。
 
-## 微信公众平台准备
+## 注册认证客户端
 
-1. 使用已认证的微信服务号，在「网页授权域名」中填写已部署站点的 HTTPS 主机名。
-2. 若微信要求验证域名，将服务号对应的验证文件放在站点根目录，再完成校验。
-
-网页授权使用站点的 `/api/auth/wechat/callback` 路径。公众号的消息推送配置独立于此回调。
+在独立微信认证服务中为 Chat Demo 登记客户端 ID、独立密钥和完整的 HTTPS 回调地址，例如 `https://chat.example.com/api/auth/wechat/callback`。这是认证服务将电脑浏览器送回 Chat Demo 的地址。公众号后台的网页授权域名配置认证服务本身的主机名。
 
 ## 配置服务端
 
@@ -21,9 +18,9 @@ chmod 600 server/.env
 编辑 `server/.env`：
 
 - `APP_ORIGIN=https://chat.example.com`
-- `WECHAT_APP_ID`：你的微信服务号 AppID。
-- `WECHAT_APP_SECRET`：现有服务号 AppSecret。
-- `WECHAT_REDIRECT_URI=https://chat.example.com/api/auth/wechat/callback`
+- `AUTH_SERVICE_ORIGIN=https://auth.example.com`
+- `AUTH_CLIENT_ID` 和 `AUTH_CLIENT_SECRET`：在独立认证服务中登记的客户端凭据。
+- `WECHAT_APP_ID`：已有 Chat Demo 账号所使用的微信服务号 AppID。
 - `API_KEY_ENCRYPTION_KEY`：使用 `openssl rand -base64 32` 生成 32 字节密钥。
 - `DATA_DIR`：SQLite 数据库和 ZIP 备份的持久化目录。
 
@@ -71,13 +68,11 @@ server {
 
 ## 微信扫码登录流程
 
-1. 打开「微信扫码登录」，可选勾选允许保存并显示微信昵称和头像，然后生成二维码。
-2. 前端生成二维码，二维码内容是微信服务号网页授权 URL。
-3. 用手机微信扫码。默认使用 `snsapi_base` 获取 OpenID。勾选资料选项时使用 `snsapi_userinfo`，由微信确认资料授权。
-4. 服务端用 AppID、AppSecret 和一次性 code 换取 OpenID。
-5. 电脑端使用独立的轮询密钥领取登录会话。二维码 state、电脑端轮询 ticket 和轮询密钥彼此分离，均有短有效期且只能使用一次。
+1. 在 Chat Demo 点「微信扫码登录」，跳到独立认证服务的二维码页面。
+2. 手机扫码成功后，电脑回到 Chat Demo，并带回一个一次性登录码。
+3. Chat Demo 校验浏览器的登录状态，再用自己的客户端凭据和 PKCE 凭证兑换身份，创建本地会话。
 
-只有勾选资料选项且微信授权后，本站才会读取并保存昵称与头像地址。普通扫码仍会登录同一账号，并保留之前已授权的资料。
+Chat Demo 会先核对认证结果里的 AppID，再用 OpenID 找回原账号。API Key 和云备份仍归属该账号。独立认证服务返回身份，Chat Demo 继续显示账号里已保存的昵称和头像。
 
 ## 数据行为
 

@@ -3,7 +3,6 @@ import { setApiKey, useSettings } from './settings.js'
 
 export type AuthUser = { id: string; nickname: string; avatarUrl: string }
 export type CloudBackupInfo = { exists: boolean; byteSize: number; updatedAt: string | null }
-export type WechatLoginChallenge = { ticket: string; pollSecret: string; authorizeUrl: string; expiresIn: number }
 type AuthState = {
   ready: boolean
   user: AuthUser | null
@@ -76,33 +75,16 @@ export const initAuth = async () => {
     useAuthStore.setState({ ready: true })
   }
 }
-export const beginWechatLogin = async (includeProfile: boolean): Promise<WechatLoginChallenge> => {
+export const beginWechatLogin = async () => {
   useAuthStore.setState({ loginBusy: true })
   try {
-    return await request<WechatLoginChallenge>('/api/auth/wechat/start', {
+    const { authorizeUrl } = await request<{ authorizeUrl: string }>('/api/auth/wechat/start', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ includeProfile }),
     })
+    window.location.assign(authorizeUrl)
   } finally {
     useAuthStore.setState({ loginBusy: false })
   }
-}
-export const pollWechatLogin = async (challenge: WechatLoginChallenge): Promise<AuthUser | null> => {
-  const result = await request<
-    | { status: 'pending' }
-    | { status: 'authenticated'; user: AuthUser }
-  >('/api/auth/wechat/poll', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ticket: challenge.ticket, pollSecret: challenge.pollSecret }),
-  })
-  if (result.status === 'pending') {
-    return null
-  }
-  useAuthStore.setState({ user: result.user })
-  await loadAccountData(result.user)
-  return result.user
 }
 export const logout = async () => {
   await request<undefined>('/api/auth/logout', { method: 'POST' })

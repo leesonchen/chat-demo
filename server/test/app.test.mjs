@@ -1,8 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { once } from 'node:events'
-import { randomBytes, randomUUID } from 'node:crypto'
-import { createDatabase, migrateDatabase } from '../database.mjs'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import { createDatabase } from '../database.mjs'
 import { createAppServer } from '../app.mjs'
 import { sha256 } from '../security.mjs'
 
@@ -23,12 +23,11 @@ const makeServer = async (options = {}) => {
       appOrigin: 'http://localhost:8090',
       backupDir,
       encryptionKey: key,
-      secureCookies: false,
-      wechatAppId: options.wechatAppId ?? '',
-      wechatAppSecret: options.wechatAppSecret ?? '',
-      wechatRedirectUri: options.wechatRedirectUri ?? '',
+      secureCookies: Boolean(options.secureCookies),
+      wechatAuth: options.wechatAuth,
     },
     fetchImpl: options.fetchImpl,
+    now: options.now,
   })
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
@@ -115,208 +114,140 @@ test('cloud backup replaces one user snapshot and can be restored', async (t) =>
   assert.equal(missingForOtherUser.status, 401)
 })
 
-test('WeChat login start refuses to run until credentials are configured', async (t) => {
+const appOrigin = 'http://localhost:8090'
+const callbackPath = '/api/auth/wechat/callback'
+const wechatAuth = {
+  origin: 'https://auth.example.com',
+  clientId: 'chat-demo',
+  clientSecret: 'fixture-client-secret',
+  wechatAppId: 'wx0123456789abcdef',
+}
+const cookiePair = value => value.split(';')[0]
+
+const startLogin = app => fetch(app.baseUrl + '/api/auth/wechat/start', {
+  method: 'POST',
+  headers: { origin: appOrigin },
+})
+
+test('WeChat login start requires its configured identity service and the app origin', async (t) => {
   const app = await makeServer()
   t.after(app.close)
-  const response = await fetch(`${app.baseUrl}/api/auth/wechat/start`, {
-    method: 'POST',
-    headers: { origin: 'http://localhost:8090' },
+  assert.equal((await startLogin(app)).status, 503)
+  const crossOrigin = await fetch(app.baseUrl + '/api/auth/wechat/start', {
+    method: 'POST', headers: { origin: 'https://other.example.com' },
   })
-  assert.equal(response.status, 503)
+  assert.equal(crossOrigin.status, 403)
 })
 
-test('WeChat Official Account QR login completes through a one-time browser polling ticket', async (t) => {
-  let wechatCalls = 0
+test('delegated login restores the existing account, profile, API Key and cloud backup', async (t) => {
+  let authorize
+  let exchanged = 0
+  const code = 'C'.repeat(43)
   const app = await makeServer({
-    wechatAppId: 'wx-test-app',
-    wechatAppSecret: 'test-secret',
-    wechatRedirectUri: 'http://localhost:8090/api/auth/wechat/callback',
-    fetchImpl: async (input) => {
-      wechatCalls += 1
-      const url = new URL(input)
-      assert.equal(url.pathname, '/sns/oauth2/access_token')
-      assert.equal(url.searchParams.get('appid'), 'wx-test-app')
-      assert.equal(url.searchParams.get('secret'), 'test-secret')
-      return {
-        ok: true,
-        json: async () => ({
-          access_token: 'wechat-web-access-token',
-          openid: 'wechat-openid',
-          unionid: 'wechat-unionid',
-        }),
-      }
+    wechatAuth,
+    secureCookies: true,
+    fetchImpl: async (input, request) => {
+      exchanged++
+      assert.equal(input.href, wechatAuth.origin + '/exchange')
+      assert.equal(request.redirect, 'error')
+      assert.equal(request.headers.Authorization,
+        'Basic ' + Buffer.from(wechatAuth.clientId + ':' + wechatAuth.clientSecret).toString('base64'))
+      const body = JSON.parse(request.body)
+      assert.equal(body.code, code)
+      assert.equal(body.redirect_uri, appOrigin + callbackPath)
+      assert.equal(createHash('sha256').update(body.code_verifier).digest('base64url'),
+        authorize.searchParams.get('code_challenge'))
+      return Response.json({ appid: wechatAuth.wechatAppId, openid: 'existing-openid' })
     },
   })
   t.after(app.close)
+  const current = Date.now()
+  const avatar = 'https://thirdwx.qlogo.cn/mmopen/example/132'
+  app.db.prepare('UPDATE users SET avatar_url = ? WHERE id = ?').run(avatar, app.userId)
+  app.db.prepare(`INSERT INTO oauth_identities (id, user_id, provider, openid, unionid, created_at, updated_at)
+    VALUES (?, ?, 'wechat', 'existing-openid', 'old-unionid', ?, ?)`).run(randomUUID(), app.userId, current, current)
+  const oldSession = 'chat_demo_session=' + app.token
+  const apiKey = 'sk-previous-key'
+  const backup = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0x01, 0x02])
+  const put = (path, contentType, body) => fetch(app.baseUrl + path, {
+    method: 'PUT', headers: { Cookie: oldSession, Origin: appOrigin, 'Content-Type': contentType }, body,
+  })
+  assert.equal((await put('/api/account/api-key', 'application/json', JSON.stringify({ apiKey }))).status, 200)
+  assert.equal((await put('/api/backup', 'application/zip', backup)).status, 200)
 
-  const origin = 'http://localhost:8090'
-  const start = await fetch(`${app.baseUrl}/api/auth/wechat/start`, { method: 'POST', headers: { origin: 'http://localhost:8090' } })
+  const start = await startLogin(app)
   assert.equal(start.status, 200)
-  const challenge = await start.json()
-  assert.ok(challenge.ticket)
-  assert.ok(challenge.pollSecret)
-  assert.equal(challenge.expiresIn, 600)
+  const loginCookie = start.headers.get('set-cookie')
+  assert.match(loginCookie, /HttpOnly; Path=\/api\/auth\/wechat\/callback; SameSite=Lax; Max-Age=600; Secure/)
+  authorize = new URL((await start.json()).authorizeUrl)
+  assert.equal(authorize.origin + authorize.pathname, wechatAuth.origin + '/authorize')
+  assert.equal(authorize.searchParams.get('client_id'), wechatAuth.clientId)
+  assert.equal(authorize.searchParams.get('redirect_uri'), appOrigin + callbackPath)
+  assert.equal(authorize.searchParams.get('code_challenge_method'), 'S256')
 
-  const authorize = new URL(challenge.authorizeUrl)
   const state = authorize.searchParams.get('state')
-  assert.equal(authorize.origin, 'https://open.weixin.qq.com')
-  assert.equal(authorize.pathname, '/connect/oauth2/authorize')
-  assert.equal(authorize.searchParams.get('appid'), 'wx-test-app')
-  assert.equal(authorize.searchParams.get('scope'), 'snsapi_base')
-  assert.equal(authorize.searchParams.get('response_type'), 'code')
-  assert.equal(authorize.searchParams.get('redirect_uri'), 'http://localhost:8090/api/auth/wechat/callback')
-  assert.equal(authorize.hash, '#wechat_redirect')
+  const callback = (cookie, receivedState = state) => fetch(
+    app.baseUrl + callbackPath + '?' + new URLSearchParams({ code, state: receivedState }),
+    { redirect: 'manual', headers: cookie ? { Cookie: cookie } : {} },
+  )
+  for (const options of [[], ['chat_demo_wechat_login=' + 'x'.repeat(43)], [cookiePair(loginCookie), 's'.repeat(43)]]) {
+    const failed = await callback(...options)
+    assert.equal(failed.headers.get('location'), '/?wechat_login=failed')
+    assert.equal(failed.headers.get('set-cookie'), null)
+  }
+  assert.equal(exchanged, 0)
 
-  const pending = await fetch(`${app.baseUrl}/api/auth/wechat/poll`, {
-    method: 'POST',
-    headers: { origin, 'content-type': 'application/json' },
-    body: JSON.stringify({ ticket: challenge.ticket, pollSecret: challenge.pollSecret }),
+  const valid = await callback(cookiePair(loginCookie))
+  assert.equal(valid.status, 303)
+  assert.equal(valid.headers.get('location'), '/?wechat_login=ok')
+  assert.equal(valid.headers.get('referrer-policy'), 'no-referrer')
+  const [session, cleared] = valid.headers.getSetCookie()
+  assert.match(session, /^chat_demo_session=[^;]+; HttpOnly; Path=\/; SameSite=Lax; Max-Age=\d+; Secure$/)
+  assert.match(cleared, /chat_demo_wechat_login=;.*Max-Age=0/)
+  assert.equal((await callback(cookiePair(loginCookie))).headers.get('location'), '/?wechat_login=failed')
+  assert.equal(exchanged, 1)
+
+  const get = path => fetch(app.baseUrl + path, { headers: { Cookie: cookiePair(session) } })
+  assert.deepEqual(await (await get('/api/auth/me')).json(), {
+    user: { id: app.userId, nickname: 'Test User', avatarUrl: avatar },
   })
-  assert.deepEqual(await pending.json(), { status: 'pending' })
-
-  const forgedPoll = await fetch(`${app.baseUrl}/api/auth/wechat/poll`, {
-    method: 'POST',
-    headers: { origin, 'content-type': 'application/json' },
-    body: JSON.stringify({ ticket: challenge.ticket, pollSecret: 'wrong-secret' }),
-  })
-  assert.equal(forgedPoll.status, 404)
-
-  const callback = await fetch(`${app.baseUrl}/api/auth/wechat/callback?code=single-use-code&state=${state}`)
-  assert.equal(callback.status, 200)
-  assert.match(await callback.text(), /微信身份验证成功/)
-  assert.equal(wechatCalls, 1)
-
-  const identity = app.db.prepare("SELECT user_id, unionid FROM oauth_identities WHERE provider = 'wechat' AND openid = ?").get('wechat-openid')
-  assert.ok(identity)
-  assert.equal(identity.unionid, 'wechat-unionid')
-
-  const poll = await fetch(`${app.baseUrl}/api/auth/wechat/poll`, {
-    method: 'POST',
-    headers: { origin, 'content-type': 'application/json' },
-    body: JSON.stringify({ ticket: challenge.ticket, pollSecret: challenge.pollSecret }),
-  })
-  assert.equal(poll.status, 200)
-  const result = await poll.json()
-  assert.equal(result.status, 'authenticated')
-  assert.equal(result.user.id, identity.user_id)
-  assert.equal(result.user.nickname, '微信用户')
-  assert.ok(poll.headers.get('set-cookie')?.includes('chat_demo_session='))
-
-  const me = await fetch(`${app.baseUrl}/api/auth/me`, {
-    headers: { cookie: poll.headers.get('set-cookie').split(';')[0] },
-  })
-  assert.equal((await me.json()).user.id, identity.user_id)
-
-  const replay = await fetch(`${app.baseUrl}/api/auth/wechat/callback?code=single-use-code&state=${state}`)
-  assert.equal(replay.status, 400)
-
-  const replayPoll = await fetch(`${app.baseUrl}/api/auth/wechat/poll`, {
-    method: 'POST',
-    headers: { origin, 'content-type': 'application/json' },
-    body: JSON.stringify({ ticket: challenge.ticket, pollSecret: challenge.pollSecret }),
-  })
-  assert.equal(replayPoll.status, 404)
+  assert.deepEqual(await (await get('/api/account/api-key')).json(), { apiKey })
+  assert.deepEqual(Buffer.from(await (await get('/api/backup')).arrayBuffer()), backup)
+  assert.equal(app.db.prepare('SELECT count(*) AS count FROM users').get().count, 1)
+  assert.equal(app.db.prepare('SELECT unionid FROM oauth_identities').get().unionid, 'old-unionid')
 })
 
-test('the same WeChat login can opt in to display profile without changing the account', async (t) => {
-  const origin = 'http://localhost:8090'
-  let profileRequests = 0
+test('expired state and identities from another WeChat AppID do not create sessions', async (t) => {
+  let clock = Date.now()
+  let exchanged = 0
   const app = await makeServer({
-    wechatAppId: 'wx-test-app',
-    wechatAppSecret: 'test-secret',
-    wechatRedirectUri: origin + '/api/auth/wechat/callback',
-    fetchImpl: async (url) => {
-      if (url.pathname === '/sns/oauth2/access_token') {
-        return Response.json({
-          access_token: 'web-token',
-          openid: 'my-openid',
-          scope: url.searchParams.get('code') === 'base-scope' ? 'snsapi_base' : 'snsapi_userinfo',
-        })
-      }
-      profileRequests += 1
-      assert.equal(url.pathname, '/sns/userinfo')
-      assert.equal(url.searchParams.get('openid'), 'my-openid')
-      return Response.json({
-        openid: 'my-openid',
-        nickname: '新昵称',
-        headimgurl: 'http://thirdwx.qlogo.cn/mmopen/example/132',
-      })
+    wechatAuth,
+    now: () => clock,
+    fetchImpl: async () => {
+      exchanged++
+      return Response.json({ appid: 'wx1111111111111111', openid: 'other-openid' })
     },
   })
   t.after(app.close)
-  app.db.prepare(`INSERT INTO oauth_identities (id, user_id, provider, openid, created_at, updated_at)
-    VALUES (?, ?, 'wechat', 'my-openid', ?, ?)`).run(randomUUID(), app.userId, Date.now(), Date.now())
-
-  const headers = { origin, 'content-type': 'application/json' }
-  const start = async (includeProfile) => {
-    const response = await fetch(app.baseUrl + '/api/auth/wechat/start', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ includeProfile }),
+  const begin = async () => {
+    const response = await startLogin(app)
+    const cookie = cookiePair(response.headers.get('set-cookie'))
+    const state = new URL((await response.json()).authorizeUrl).searchParams.get('state')
+    return () => fetch(app.baseUrl + callbackPath + '?' + new URLSearchParams({ code: 'C'.repeat(43), state }), {
+      redirect: 'manual', headers: { Cookie: cookie },
     })
-    assert.equal(response.status, 200)
-    const { ticket, pollSecret, authorizeUrl } = await response.json()
-    const authorize = new URL(authorizeUrl)
-    assert.equal(authorize.searchParams.get('scope'), includeProfile ? 'snsapi_userinfo' : 'snsapi_base')
-    const state = authorize.searchParams.get('state')
-    return {
-      callback: (code) => fetch(app.baseUrl + '/api/auth/wechat/callback?' + new URLSearchParams({ state, code })),
-      poll: () => fetch(app.baseUrl + '/api/auth/wechat/poll', {
-        method: 'POST', headers, body: JSON.stringify({ ticket, pollSecret }),
-      }),
-    }
   }
 
-  for (const [code, status] of [['authdeny', 400], ['base-scope', 502]]) {
-    const attempt = await start(true)
-    assert.equal((await attempt.callback(code)).status, status)
-    assert.equal((await attempt.poll()).status, 400)
-  }
-  assert.equal(profileRequests, 0)
+  const expired = await begin()
+  clock += 10 * 60 * 1000
+  assert.equal((await expired()).headers.get('location'), '/?wechat_login=failed')
+  assert.equal(exchanged, 0)
 
-  const basic = await start(false)
-  // Even a token with profile scope does not trigger profile access for an opt-out login.
-  assert.equal((await basic.callback('granted')).status, 200)
-  assert.equal((await (await basic.poll()).json()).user.nickname, 'Test User')
-  assert.equal(profileRequests, 0)
-
-  const consent = await start(true)
-  assert.equal((await consent.callback('granted')).status, 200)
-  const response = await consent.poll()
-  assert.equal(response.status, 200)
-  assert.match(response.headers.get('set-cookie'), /chat_demo_session=/)
-  const expectedUser = {
-    id: app.userId,
-    nickname: '新昵称',
-    avatarUrl: 'https://thirdwx.qlogo.cn/mmopen/example/132',
-  }
-  assert.deepEqual(await response.json(), { status: 'authenticated', user: expectedUser })
-  assert.equal(profileRequests, 1)
-  assert.equal((await consent.poll()).status, 404)
-
-  const next = await start(false)
-  assert.equal((await next.callback('base-scope')).status, 200)
-  assert.deepEqual((await (await next.poll()).json()).user, expectedUser)
-  assert.equal(profileRequests, 1)
-})
-
-test('database upgrade preserves basic login attempts and retires separate profile QR codes', (t) => {
-  const db = createDatabase(':memory:')
-  t.after(() => db.close())
-  db.exec(`
-    ALTER TABLE wechat_login_attempts DROP COLUMN include_profile;
-    CREATE TABLE wechat_profile_attempts (
-      ticket_hash TEXT PRIMARY KEY REFERENCES wechat_login_attempts(ticket_hash) ON DELETE CASCADE
-    );
-    INSERT INTO wechat_login_attempts (ticket_hash, poll_secret_hash, state_hash, expires_at, created_at)
-      VALUES ('basic', 'poll-a', 'state-a', 2, 1), ('separate', 'poll-b', 'state-b', 2, 1);
-    INSERT INTO wechat_profile_attempts (ticket_hash) VALUES ('separate');
-  `)
-
-  migrateDatabase(db)
-  const attempts = db.prepare('SELECT ticket_hash, include_profile FROM wechat_login_attempts').all()
-  assert.equal(attempts.length, 1)
-  assert.equal(attempts[0].ticket_hash, 'basic')
-  assert.equal(attempts[0].include_profile, 0)
-  assert.equal(db.prepare('SELECT count(*) AS count FROM wechat_profile_attempts').get().count, 0)
+  const wrongApp = await begin()
+  const result = await wrongApp()
+  assert.equal(result.headers.get('location'), '/?wechat_login=failed')
+  assert.equal(exchanged, 1)
+  assert.ok(result.headers.getSetCookie().every(cookie => !cookie.startsWith('chat_demo_session=')))
+  assert.equal(app.db.prepare('SELECT count(*) AS count FROM users').get().count, 1)
+  assert.equal(app.db.prepare('SELECT count(*) AS count FROM sessions').get().count, 1)
 })

@@ -9,13 +9,32 @@ process.umask(0o077)
 const root = path.dirname(fileURLToPath(import.meta.url))
 const appOrigin = new URL(process.env.APP_ORIGIN ?? 'http://localhost:8090').origin
 const dataDir = path.resolve(process.env.DATA_DIR ?? path.join(root, 'data'))
-const redirectUri = process.env.WECHAT_REDIRECT_URI ?? `${appOrigin}/api/auth/wechat/callback`
-if (new URL(redirectUri).origin !== appOrigin || new URL(redirectUri).pathname !== '/api/auth/wechat/callback') {
-  throw new Error('WECHAT_REDIRECT_URI must use APP_ORIGIN and /api/auth/wechat/callback')
-}
-if (process.env.NODE_ENV === 'production' && !appOrigin.startsWith('https://')) {
+const production = process.env.NODE_ENV === 'production'
+if (production && !appOrigin.startsWith('https://')) {
   throw new Error('APP_ORIGIN must use HTTPS in production')
 }
+
+const readWechatAuth = () => {
+  const {
+    AUTH_SERVICE_ORIGIN: origin,
+    AUTH_CLIENT_ID: clientId,
+    AUTH_CLIENT_SECRET: clientSecret,
+    WECHAT_APP_ID: wechatAppId,
+  } = process.env
+  if (!origin && !clientId && !clientSecret) return null
+
+  const url = URL.parse(origin ?? '')
+  const loopback = new Set(['localhost', '127.0.0.1', '[::1]'])
+  const local = !production && url?.protocol === 'http:' && loopback.has(url.hostname)
+  if (!url || url.origin !== origin || (url.protocol !== 'https:' && !local) ||
+      !/^[A-Za-z0-9_-]{1,64}$/.test(clientId ?? '') ||
+      !/^[A-Za-z0-9._~-]{32,256}$/.test(clientSecret ?? '') ||
+      !/^wx[a-f0-9]{16}$/i.test(wechatAppId ?? '')) {
+    throw new Error('WeChat login needs a valid AUTH_SERVICE_ORIGIN, AUTH_CLIENT_ID, AUTH_CLIENT_SECRET, and WECHAT_APP_ID')
+  }
+  return { origin, clientId, clientSecret, wechatAppId }
+}
+const wechatAuth = readWechatAuth()
 const encryptionKey = parseEncryptionKey(process.env.API_KEY_ENCRYPTION_KEY)
 const db = createDatabase(path.join(dataDir, 'chat-demo.sqlite'))
 const server = createAppServer({
@@ -24,10 +43,8 @@ const server = createAppServer({
     appOrigin,
     backupDir: path.join(dataDir, 'backups'),
     encryptionKey,
-    secureCookies: process.env.NODE_ENV === 'production',
-    wechatAppId: process.env.WECHAT_APP_ID ?? '',
-    wechatAppSecret: process.env.WECHAT_APP_SECRET ?? '',
-    wechatRedirectUri: redirectUri,
+    secureCookies: production,
+    wechatAuth,
   },
 })
 
