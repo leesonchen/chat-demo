@@ -2,6 +2,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createDatabase } from './database.mjs'
 import { createAppServer } from './app.mjs'
+import { readWechatPayConfig } from './wechat-pay.mjs'
 import { parseEncryptionKey } from './security.mjs'
 
 process.umask(0o077)
@@ -39,6 +40,7 @@ const membershipMode = process.env.MEMBERSHIP_MODE ?? 'off'
 if (!['off', 'preview', 'required'].includes(membershipMode)) {
   throw new Error('MEMBERSHIP_MODE must be off, preview, or required')
 }
+const wechatPay = readWechatPayConfig(process.env, appOrigin)
 const encryptionKey = parseEncryptionKey(process.env.API_KEY_ENCRYPTION_KEY)
 const db = createDatabase(path.join(dataDir, 'chat-demo.sqlite'))
 const server = createAppServer({
@@ -50,6 +52,7 @@ const server = createAppServer({
     secureCookies: production,
     wechatAuth,
     membershipMode,
+    wechatPay,
   },
 })
 

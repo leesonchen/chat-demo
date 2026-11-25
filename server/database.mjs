@@ -73,6 +73,16 @@ export const migrateDatabase = (db) => {
     CREATE INDEX IF NOT EXISTS membership_paid_by_user
       ON membership_orders(user_id, paid_until DESC) WHERE status = 'paid';
 
+    CREATE TABLE IF NOT EXISTS wechat_native_checkouts (
+      order_id TEXT PRIMARY KEY REFERENCES membership_orders(id) ON DELETE CASCADE,
+      expires_at INTEGER NOT NULL,
+      code_url TEXT,
+      closed INTEGER NOT NULL DEFAULT 0,
+      last_query_at INTEGER
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS membership_orders_by_user
+      ON membership_orders(user_id, provider, created_at DESC);
+
     CREATE TABLE IF NOT EXISTS delegated_wechat_attempts (
       state_hash TEXT PRIMARY KEY,
       browser_hash TEXT NOT NULL,

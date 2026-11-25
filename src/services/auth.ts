@@ -8,7 +8,20 @@ type MembershipInfo = {
   plan: { id: string; amountFen: number; currency: 'CNY'; interval: 'month' }
   mode: 'off' | 'preview' | 'required'
   cloudBackupAllowed: boolean
+  wechatNativeAvailable?: boolean
 }
+
+export type WechatNativeOrder = {
+  id: string
+  status: 'pending' | 'paid' | 'expired'
+  codeUrl: string | null
+  expiresAt: string
+}
+const wechatNativePath = '/api/membership/wechat/native'
+export const startWechatNativePayment = () =>
+  request<WechatNativeOrder>(wechatNativePath, { method: 'POST' })
+export const readWechatNativePayment = (id: string, refresh = false) =>
+  request<WechatNativeOrder>(`${wechatNativePath}/${id}`, { method: refresh ? 'POST' : 'GET' })
 
 export type CloudBackupInfo = {
   exists: boolean

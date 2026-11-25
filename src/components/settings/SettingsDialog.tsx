@@ -1,5 +1,5 @@
 import clsx from 'clsx'
-import { useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   IconDarkOutline16,
   IconDataOutline16,
@@ -34,7 +34,16 @@ import { Button } from '../base/Button.js'
 import { Modal } from '../base/Modal.js'
 import { Select } from '../base/Select.js'
 import { showToast } from '../base/toastState.js'
-import { dismissApiKeyUploadPrompt, refreshCloudBackupInfo, saveCurrentApiKeyToCloud, useAuthStore } from '../../services/auth.js'
+import {
+  dismissApiKeyUploadPrompt,
+  readWechatNativePayment,
+  refreshCloudBackupInfo,
+  saveCurrentApiKeyToCloud,
+  startWechatNativePayment,
+  useAuthStore,
+  type WechatNativeOrder,
+} from '../../services/auth.js'
+import qrcode from 'qrcode-generator'
 import { exportHistoryToServer, importHistoryFromServer } from '../../services/cloudBackup.js'
 import { ApiKeyConfirm, ApiKeyField, useApiKeyEditor } from './ApiKeyField.js'
 import { closeSettings, useSettingsDialog, type SettingsSection } from './settingsDialogState.js'
@@ -502,22 +511,123 @@ const SettingCell = ({
   )
 }
 
+const WechatNativePayment = ({ amount }: { amount: string }) => {
+  const t = useTranslate()
+  const [order, setOrder] = useState<WechatNativeOrder | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(false)
+  const codeUrl = order?.codeUrl
+  const qr = useMemo(() => {
+    if (!codeUrl) {
+      return null
+    }
+    const code = qrcode(0, 'M')
+    code.addData(codeUrl)
+    code.make()
+    return code.createDataURL(5, 20)
+  }, [codeUrl])
+
+  useEffect(() => {
+    if (order?.status !== 'pending') {
+      return
+    }
+    let active = true
+    let timer: number
+    const check = async () => {
+      try {
+        const current = await readWechatNativePayment(order.id)
+        if (!active) {
+          return
+        }
+        if (current.status !== 'pending') {
+          setOrder(previous => previous?.status === 'paid' ? previous : current)
+          setError(false)
+          return
+        }
+      } catch {
+        // Keep polling local status after a transient loss of connectivity.
+      }
+      if (active) {
+        timer = window.setTimeout(check, 2500)
+      }
+    }
+    timer = window.setTimeout(check, 2500)
+    return () => {
+      active = false
+      window.clearTimeout(timer)
+    }
+  }, [order])
+
+  useEffect(() => {
+    if (order?.status === 'paid') {
+      void refreshCloudBackupInfo()
+    }
+  }, [order?.status])
+
+  const manageOrder = async (refresh: boolean) => {
+    setBusy(true)
+    setError(false)
+    try {
+      const current = refresh && order
+        ? await readWechatNativePayment(order.id, true)
+        : await startWechatNativePayment()
+      setOrder(previous => refresh && previous?.status === 'paid' ? previous : current)
+    } catch {
+      setError(true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className={styles.wechatPayment}>
+      <p>{t('cloudMembershipOneTime', { amount })}</p>
+      {qr && (
+        <img className={styles.wechatPaymentCode} src={qr} alt={t('cloudMembershipScanWechat')} />
+      )}
+      <div aria-live="polite">
+        {order?.status === 'pending' && t('cloudMembershipScanWechat')}
+        {order?.status === 'expired' && t('cloudMembershipPaymentExpired')}
+        {order?.status === 'paid' && t('cloudMembershipPaymentPaid')}
+        {error && <div className={styles.error}>{t('cloudMembershipPaymentError')}</div>}
+      </div>
+      <div className={styles.wechatPaymentActions}>
+        {order?.status !== 'pending' && (
+          <Button size="m" variant="outlined" disabled={busy} onClick={() => void manageOrder(false)}>
+            {t('cloudMembershipPayWechat')}
+          </Button>
+        )}
+        {order && order.status !== 'paid' && (
+          <Button size="m" variant="outlined" disabled={busy} onClick={() => void manageOrder(true)}>
+            {t('cloudMembershipCheckWechatPayment')}
+          </Button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 const CloudMembership = () => {
   const t = useTranslate()
   const membership = useAuthStore((state) => state.backupInfo?.membership)
+  const userId = useAuthStore((state) => state.user?.id)
   if (!membership || membership.mode === 'off') {
     return null
   }
-  const { tier, paidUntil, plan } = membership
+  const { tier, paidUntil, plan, wechatNativeAvailable } = membership
+  const amount = (plan.amountFen / 100).toString()
   return (
-    <SettingCell
-      label={t(tier === 'member' ? 'cloudMembershipActive' : 'cloudMembershipFree')}
-      description={tier === 'member' && paidUntil
-        ? t('cloudMembershipPaidUntil', { date: new Date(paidUntil).toLocaleString() })
-        : t('cloudMembershipPlanUnavailable', { amount: (plan.amountFen / 100).toString() })}
-      status={null}
-      action={null}
-    />
+    <>
+      <SettingCell
+        label={t(tier === 'member' ? 'cloudMembershipActive' : 'cloudMembershipFree')}
+        description={tier === 'member' && paidUntil
+          ? t('cloudMembershipPaidUntil', { date: new Date(paidUntil).toLocaleString() })
+          : wechatNativeAvailable ? t('cloudMembershipRequired') : t('cloudMembershipPlanUnavailable', { amount })}
+        status={null}
+        action={null}
+      />
+      {wechatNativeAvailable && <WechatNativePayment key={userId} amount={amount} />}
+    </>
   )
 }
 

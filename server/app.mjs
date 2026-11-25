@@ -6,6 +6,7 @@ import path from 'node:path'
 import { Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { membershipStatus } from './membership.mjs'
+import { createWechatNative, WechatPayError, WECHAT_PAY_NOTIFY_PATH } from './wechat-pay.mjs'
 import { decryptSecret, encryptSecret, sha256 } from './security.mjs'
 
 const COOKIE = 'chat_demo_session'
@@ -31,10 +32,14 @@ const readCookie = (header = '', name) => header.split(';').map(part => part.tri
   .find(part => part.startsWith(name + '='))?.slice(name.length + 1)
 const setCookie = (token, secure) => `${COOKIE}=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}${secure ? '; Secure' : ''}`
 const clearCookie = (secure) => `${COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0${secure ? '; Secure' : ''}`
-const readJson = async (req) => {
+const readRequestBody = async (req) => {
   const chunks = []; let size = 0
   for await (const chunk of req) { size += chunk.length; if (size > MAX_JSON) throw new HttpError(413, 'body_too_large'); chunks.push(chunk) }
-  try { const body = JSON.parse(Buffer.concat(chunks).toString('utf8')); if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error(); return body }
+  return Buffer.concat(chunks)
+}
+const readJson = async (req) => {
+  const raw = await readRequestBody(req)
+  try { const body = JSON.parse(raw.toString('utf8')); if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error(); return body }
   catch { throw new HttpError(400, 'invalid_json') }
 }
 const verifyOrigin = (req, config) => { if (req.headers.origin !== config.appOrigin) throw new HttpError(403, 'origin_not_allowed') }
@@ -213,6 +218,14 @@ const serializeBackup = (userId, task) => {
 
 export const createAppServer = ({ db, config, fetchImpl = fetch, now = Date.now }) => {
   if (!db || !config?.appOrigin || !config?.backupDir || !config?.encryptionKey) throw new Error('Database, appOrigin, backupDir, and encryptionKey are required')
+  const mode = config.membershipMode ?? 'off'
+  const wechatNative = config.wechatPay
+    ? createWechatNative({ db, config: config.wechatPay, appOrigin: config.appOrigin, fetchImpl, now })
+    : null
+  const getMembership = (userId, time) => ({
+    ...membershipStatus(db, userId, time, mode),
+    wechatNativeAvailable: mode !== 'off' && Boolean(wechatNative),
+  })
   return http.createServer(async (req, res) => {
     const time = now()
     try {
@@ -250,10 +263,30 @@ export const createAppServer = ({ db, config, fetchImpl = fetch, now = Date.now 
         db.prepare('DELETE FROM user_secrets WHERE user_id = ?').run(user.id)
         return json(res, 200, { deleted: true })
       }
-      const mode = config.membershipMode ?? 'off'
+      if (method === 'POST' && url.pathname === WECHAT_PAY_NOTIFY_PATH) {
+        if (!wechatNative) throw new HttpError(404, 'not_found')
+        wechatNative.notify(new Headers(req.headers), await readRequestBody(req))
+        res.writeHead(204)
+        return res.end()
+      }
+      if (method === 'POST' && url.pathname === '/api/membership/wechat/native') {
+        verifyOrigin(req, config)
+        const { user } = requireUser(req, db, time)
+        if (!wechatNative || mode === 'off') throw new HttpError(503, 'wechat_payment_unavailable')
+        return json(res, 200, await wechatNative.start(user.id))
+      }
+      const orderId = /^\/api\/membership\/wechat\/native\/([a-f0-9]{32})$/.exec(url.pathname)?.[1]
+      if (orderId && (method === 'GET' || method === 'POST')) {
+        if (method === 'POST') verifyOrigin(req, config)
+        const { user } = requireUser(req, db, time)
+        if (!wechatNative) throw new HttpError(503, 'wechat_payment_unavailable')
+        const order = method === 'GET' ? wechatNative.status(user.id, orderId)
+          : await wechatNative.refresh(user.id, orderId)
+        return json(res, 200, order)
+      }
       if (method === 'GET' && url.pathname === '/api/membership') {
         const { user } = requireUser(req, db, time)
-        return json(res, 200, membershipStatus(db, user.id, time, mode))
+        return json(res, 200, getMembership(user.id, time))
       }
       if (method === 'GET' && url.pathname === '/api/backup/status') {
         const { user } = requireUser(req, db, time), backup = db.prepare('SELECT byte_size, updated_at FROM user_backups WHERE user_id = ?').get(user.id)
@@ -261,7 +294,7 @@ export const createAppServer = ({ db, config, fetchImpl = fetch, now = Date.now 
           exists: Boolean(backup),
           byteSize: backup?.byte_size ?? 0,
           updatedAt: backup ? new Date(backup.updated_at).toISOString() : null,
-          membership: membershipStatus(db, user.id, time, mode),
+          membership: getMembership(user.id, time),
         })
       }
       if (method === 'PUT' && url.pathname === '/api/backup') {
@@ -301,9 +334,11 @@ export const createAppServer = ({ db, config, fetchImpl = fetch, now = Date.now 
       throw new HttpError(404, 'not_found')
     } catch (error) {
       if (res.headersSent) return res.destroy()
-      const status = error instanceof HttpError ? error.status : 500, code = error instanceof HttpError ? error.code : 'internal_error'
+      const knownError = error instanceof HttpError || error instanceof WechatPayError
+      const status = knownError ? error.status : 500
+      const code = knownError ? error.code : 'internal_error'
       json(res, status, { error: { code } })
-      if (!(error instanceof HttpError)) process.stderr.write(`[chat-demo-server] ${code}\n`)
+      if (!knownError) process.stderr.write(`[chat-demo-server] ${code}\n`)
     }
   })
 }

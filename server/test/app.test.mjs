@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { once } from 'node:events'
-import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import { createCipheriv, createHash, generateKeyPairSync, randomBytes, randomUUID, sign, verify } from 'node:crypto'
 import { createDatabase } from '../database.mjs'
 import { createAppServer } from '../app.mjs'
 import { sha256 } from '../security.mjs'
@@ -26,6 +26,7 @@ const makeServer = async (options = {}) => {
       encryptionKey: key,
       secureCookies: Boolean(options.secureCookies),
       wechatAuth: options.wechatAuth,
+      wechatPay: options.wechatPay,
       membershipMode: options.membershipMode,
     },
     fetchImpl: options.fetchImpl,
@@ -319,4 +320,122 @@ test('expired state and identities from another WeChat AppID do not create sessi
   assert.ok(result.headers.getSetCookie().every(cookie => !cookie.startsWith('chat_demo_session=')))
   assert.equal(app.db.prepare('SELECT count(*) AS count FROM users').get().count, 1)
   assert.equal(app.db.prepare('SELECT count(*) AS count FROM sessions').get().count, 1)
+})
+
+test('WeChat Native checkout confirms only verified payments and settles each transaction once', async (t) => {
+  const merchant = generateKeyPairSync('rsa', { modulusLength: 2048 })
+  const platform = generateKeyPairSync('rsa', { modulusLength: 2048 })
+  const wechatPay = {
+    appId: 'wx0123456789abcdef',
+    mchId: '1234567890',
+    merchantSerial: 'A1',
+    merchantKey: merchant.privateKey,
+    platformKeyId: 'PUB_KEY_ID_1234567890',
+    platformKey: platform.publicKey,
+    apiKey: randomBytes(16).toString('hex'),
+  }
+  const time = Date.now()
+  const responseHeaders = body => {
+    const timestamp = Math.floor(time / 1000)
+    const nonce = 'platform-nonce'
+    const signature = sign('sha256', Buffer.from(`${timestamp}\n${nonce}\n${body}\n`), platform.privateKey)
+    return {
+      'wechatpay-timestamp': String(timestamp),
+      'wechatpay-nonce': nonce,
+      'wechatpay-serial': wechatPay.platformKeyId,
+      'wechatpay-signature': signature.toString('base64'),
+    }
+  }
+  let queriedTransaction
+  let placements = 0
+  const app = await makeServer({
+    membershipMode: 'required',
+    wechatPay,
+    now: () => time,
+    fetchImpl: async (address, options) => {
+      const url = new URL(address)
+      assert.equal(url.origin, 'https://api.mch.weixin.qq.com')
+      const fields = Object.fromEntries(
+        [...options.headers.Authorization.matchAll(/([a-z_]+)="([^"]+)"/g)].map(([, key, val]) => [key, val]),
+      )
+      assert.equal(fields.mchid, wechatPay.mchId)
+      assert.equal(fields.serial_no, wechatPay.merchantSerial)
+      const message = `${options.method}\n${url.pathname}${url.search}\n${fields.timestamp}\n${fields.nonce_str}\n${options.body ?? ''}\n`
+      assert.ok(verify('sha256', Buffer.from(message), merchant.publicKey, Buffer.from(fields.signature, 'base64')))
+      if (options.method === 'POST') {
+        assert.equal(url.pathname, '/v3/pay/transactions/native')
+        const body = JSON.parse(options.body)
+        assert.equal(body.mchid, wechatPay.mchId)
+        assert.equal(body.appid, wechatPay.appId)
+        assert.match(body.out_trade_no, /^[a-f0-9]{32}$/)
+        assert.equal(body.notify_url, 'http://localhost:8090/api/payments/wechat/native/notify')
+        assert.deepEqual(body.amount, { total: 100, currency: 'CNY' })
+        placements++
+      } else {
+        assert.equal(url.pathname, `/v3/pay/transactions/out-trade-no/${queriedTransaction.out_trade_no}`)
+        assert.equal(url.searchParams.get('mchid'), wechatPay.mchId)
+      }
+      const body = JSON.stringify(options.method === 'POST'
+        ? { code_url: 'weixin://wxpay/s/test' } : queriedTransaction)
+      return new Response(body, { headers: responseHeaders(body) })
+    },
+  })
+  t.after(app.close)
+  const cookie = `chat_demo_session=${app.token}`
+  const origin = 'http://localhost:8090'
+  const startUrl = `${app.baseUrl}/api/membership/wechat/native`
+  assert.equal((await fetch(startUrl, { method: 'POST', headers: { origin } })).status, 401)
+  assert.equal((await fetch(startUrl, { method: 'POST', headers: { cookie } })).status, 403)
+  const start = async () => {
+    const response = await fetch(startUrl, { method: 'POST', headers: { origin, cookie } })
+    assert.equal(response.status, 200)
+    return response.json()
+  }
+  const [order, repeated] = await Promise.all([start(), start()])
+  assert.equal(placements, 1)
+  assert.deepEqual(order, repeated)
+  assert.equal(order.status, 'pending')
+
+  const membership = () => fetch(`${app.baseUrl}/api/membership`, { headers: { cookie } }).then(res => res.json())
+  assert.equal((await membership()).cloudBackupAllowed, false)
+  const receipt = {
+    appid: wechatPay.appId,
+    mchid: wechatPay.mchId,
+    out_trade_no: order.id,
+    transaction_id: '2026010100000001',
+    trade_type: 'NATIVE',
+    trade_state: 'SUCCESS',
+    amount: { total: 100, currency: 'CNY' },
+  }
+  const notify = (transaction, validSignature = true) => {
+    const nonce = randomBytes(6).toString('hex')
+    const aad = 'transaction'
+    const cipher = createCipheriv('aes-256-gcm', wechatPay.apiKey, nonce)
+    cipher.setAAD(Buffer.from(aad))
+    const ciphertext = Buffer.concat([
+      cipher.update(JSON.stringify(transaction)), cipher.final(), cipher.getAuthTag(),
+    ]).toString('base64')
+    const body = JSON.stringify({ event_type: 'TRANSACTION.SUCCESS', resource: {
+      algorithm: 'AEAD_AES_256_GCM', original_type: 'transaction', associated_data: aad, nonce, ciphertext,
+    } })
+    return fetch(`${app.baseUrl}/api/payments/wechat/native/notify`, {
+      method: 'POST',
+      body,
+      headers: responseHeaders(validSignature ? body : body + ' '),
+    })
+  }
+  assert.equal((await notify(receipt, false)).status, 401)
+  assert.equal((await notify({ ...receipt, amount: { total: 1, currency: 'CNY' } })).status, 400)
+  assert.equal((await membership()).tier, 'free')
+  assert.equal((await notify(receipt)).status, 204)
+  const paidUntil = (await membership()).paidUntil
+  assert.ok(paidUntil)
+  assert.equal((await notify(receipt)).status, 204)
+  assert.equal((await membership()).paidUntil, paidUntil)
+
+  const nextOrder = await start()
+  queriedTransaction = { ...receipt, out_trade_no: nextOrder.id, transaction_id: '2026010100000002' }
+  const refreshed = await fetch(`${startUrl}/${nextOrder.id}`, { method: 'POST', headers: { cookie, origin } })
+  assert.equal((await refreshed.json()).status, 'paid')
+  assert.ok((await membership()).paidUntil > paidUntil)
 })
