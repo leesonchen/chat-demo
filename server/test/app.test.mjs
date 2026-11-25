@@ -5,6 +5,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { createDatabase } from '../database.mjs'
 import { createAppServer } from '../app.mjs'
 import { sha256 } from '../security.mjs'
+import { openMembershipOrder, settleMembershipOrder } from '../membership.mjs'
 
 const makeServer = async (options = {}) => {
   const db = createDatabase(':memory:')
@@ -25,6 +26,7 @@ const makeServer = async (options = {}) => {
       encryptionKey: key,
       secureCookies: Boolean(options.secureCookies),
       wechatAuth: options.wechatAuth,
+      membershipMode: options.membershipMode,
     },
     fetchImpl: options.fetchImpl,
     now: options.now,
@@ -112,6 +114,60 @@ test('cloud backup replaces one user snapshot and can be restored', async (t) =>
 
   const missingForOtherUser = await fetch(`${app.baseUrl}/api/backup/status`)
   assert.equal(missingForOtherUser.status, 401)
+})
+
+test('only active members can backup and restore when membership is required', async t => {
+  let time = Date.now()
+  const app = await makeServer({ membershipMode: 'required', now: () => time })
+  t.after(app.close)
+  const cookie = 'chat_demo_session=' + app.token
+  const origin = 'http://localhost:8090'
+  app.db.prepare('UPDATE sessions SET expires_at = ?').run(time + 90 * 24 * 60 * 60 * 1000)
+  const zip = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0x01, 0x02])
+
+  const get = (path) => fetch(app.baseUrl + path, { headers: { Cookie: cookie } })
+  const upload = () => fetch(app.baseUrl + '/api/backup', {
+    method: 'PUT',
+    headers: { Cookie: cookie, Origin: origin, 'Content-Type': 'application/zip' },
+    body: zip,
+  })
+  const free = await (await get('/api/membership')).json()
+  assert.equal(free.tier, 'free')
+  assert.equal(free.plan.amountFen, 100)
+  assert.equal(free.cloudBackupAllowed, false)
+  const denied = await upload()
+  assert.equal(denied.status, 402)
+  assert.equal((await denied.json()).error.code, 'membership_required')
+  assert.equal((await get('/api/backup')).status, 402)
+
+  const orderId = openMembershipOrder(app.db, app.userId, 'wechat', time)
+  assert.equal((await (await get('/api/membership')).json()).tier, 'free')
+  const paidUntil = settleMembershipOrder(app.db, {
+    orderId, provider: 'wechat', transactionId: 'wechat-order-1', amountFen: 100, currency: 'CNY',
+  }, time)
+  assert.equal((await (await get('/api/membership')).json()).tier, 'member')
+  assert.equal((await upload()).status, 200)
+  assert.deepEqual(Buffer.from(await (await get('/api/backup')).arrayBuffer()), zip)
+
+  time = paidUntil
+  const status = await (await get('/api/backup/status')).json()
+  assert.equal(status.exists, true)
+  assert.equal(status.membership.tier, 'free')
+  assert.equal((await upload()).status, 402)
+  assert.equal((await get('/api/backup')).status, 402)
+  assert.equal(app.db.prepare('SELECT count(*) AS n FROM user_backups').get().n, 1)
+})
+
+test('preview presents the plan while allowing existing cloud backups', async t => {
+  const app = await makeServer({ membershipMode: 'preview' })
+  t.after(app.close)
+  const response = await fetch(app.baseUrl + '/api/backup/status', {
+    headers: { Cookie: 'chat_demo_session=' + app.token },
+  })
+  const { membership } = await response.json()
+  assert.equal(membership.mode, 'preview')
+  assert.equal(membership.tier, 'free')
+  assert.equal(membership.cloudBackupAllowed, true)
 })
 
 const appOrigin = 'http://localhost:8090'

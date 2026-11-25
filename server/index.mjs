@@ -35,6 +35,10 @@ const readWechatAuth = () => {
   return { origin, clientId, clientSecret, wechatAppId }
 }
 const wechatAuth = readWechatAuth()
+const membershipMode = process.env.MEMBERSHIP_MODE ?? 'off'
+if (!['off', 'preview', 'required'].includes(membershipMode)) {
+  throw new Error('MEMBERSHIP_MODE must be off, preview, or required')
+}
 const encryptionKey = parseEncryptionKey(process.env.API_KEY_ENCRYPTION_KEY)
 const db = createDatabase(path.join(dataDir, 'chat-demo.sqlite'))
 const server = createAppServer({
@@ -45,6 +49,7 @@ const server = createAppServer({
     encryptionKey,
     secureCookies: production,
     wechatAuth,
+    membershipMode,
   },
 })
 

@@ -5,6 +5,7 @@ import http from 'node:http'
 import path from 'node:path'
 import { Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
+import { membershipStatus } from './membership.mjs'
 import { decryptSecret, encryptSecret, sha256 } from './security.mjs'
 
 const COOKIE = 'chat_demo_session'
@@ -47,6 +48,11 @@ const getSession = (req, db, now) => {
   return { tokenHash, user: { id: row.id, nickname: row.nickname, avatarUrl: row.avatar_url } }
 }
 const requireUser = (req, db, now) => { const session = getSession(req, db, now); if (!session) throw new HttpError(401, 'authentication_required'); return session }
+const requireBackupMembership = (db, userId, time, mode) => {
+  if (mode === 'required' && !membershipStatus(db, userId, time, mode).cloudBackupAllowed) {
+    throw new HttpError(402, 'membership_required')
+  }
+}
 const loginCookie = (token, secure, maxAge) =>
   `${LOGIN_COOKIE}=${token}; HttpOnly; Path=${WECHAT_CALLBACK_PATH}; SameSite=Lax; Max-Age=${maxAge}${secure ? '; Secure' : ''}`
 
@@ -244,18 +250,30 @@ export const createAppServer = ({ db, config, fetchImpl = fetch, now = Date.now 
         db.prepare('DELETE FROM user_secrets WHERE user_id = ?').run(user.id)
         return json(res, 200, { deleted: true })
       }
+      const mode = config.membershipMode ?? 'off'
+      if (method === 'GET' && url.pathname === '/api/membership') {
+        const { user } = requireUser(req, db, time)
+        return json(res, 200, membershipStatus(db, user.id, time, mode))
+      }
       if (method === 'GET' && url.pathname === '/api/backup/status') {
         const { user } = requireUser(req, db, time), backup = db.prepare('SELECT byte_size, updated_at FROM user_backups WHERE user_id = ?').get(user.id)
-        return json(res, 200, { exists: Boolean(backup), byteSize: backup?.byte_size ?? 0, updatedAt: backup ? new Date(backup.updated_at).toISOString() : null })
+        return json(res, 200, {
+          exists: Boolean(backup),
+          byteSize: backup?.byte_size ?? 0,
+          updatedAt: backup ? new Date(backup.updated_at).toISOString() : null,
+          membership: membershipStatus(db, user.id, time, mode),
+        })
       }
       if (method === 'PUT' && url.pathname === '/api/backup') {
         verifyOrigin(req, config); const { user } = requireUser(req, db, time)
+        requireBackupMembership(db, user.id, time, mode)
         const contentType = String(req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase()
         if (!['application/zip', 'application/x-zip-compressed'].includes(contentType)) throw new HttpError(415, 'unsupported_backup_type')
         if (Number(req.headers['content-length'] ?? 0) > MAX_BACKUP) throw new HttpError(413, 'backup_too_large')
         const saved = await writeBackup(req, config.backupDir, user.id)
         try {
           await serializeBackup(user.id, async () => {
+            requireBackupMembership(db, user.id, now(), mode)
             const previous = db.prepare('SELECT file_name FROM user_backups WHERE user_id = ?').get(user.id)
             try {
               db.prepare(`INSERT INTO user_backups (user_id, file_name, byte_size, sha256, updated_at) VALUES (?, ?, ?, ?, ?)
@@ -270,7 +288,9 @@ export const createAppServer = ({ db, config, fetchImpl = fetch, now = Date.now 
         return json(res, 200, { saved: true, byteSize: saved.byteSize, updatedAt: new Date(now()).toISOString() })
       }
       if (method === 'GET' && url.pathname === '/api/backup') {
-        const { user } = requireUser(req, db, time), backup = db.prepare('SELECT file_name, sha256 FROM user_backups WHERE user_id = ?').get(user.id)
+        const { user } = requireUser(req, db, time)
+        requireBackupMembership(db, user.id, time, mode)
+        const backup = db.prepare('SELECT file_name, sha256 FROM user_backups WHERE user_id = ?').get(user.id)
         if (!backup) throw new HttpError(404, 'backup_not_found')
         const filePath = path.join(config.backupDir, backup.file_name)
         let info

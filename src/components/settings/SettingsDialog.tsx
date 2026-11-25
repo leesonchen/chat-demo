@@ -114,6 +114,7 @@ const SettingsContent = ({
             <>
               <ApiKeyField editor={apiKeyEditor} />
               <CloudKeyPrompt />
+              <CloudMembership />
               <ImportHistory historyImport={historyImport} disabled={historyBusy} />
               <ExportHistory disabled={historyBusy} />
               <SettingCell
@@ -460,6 +461,16 @@ const errorStatus = (key: TranslationKey, error: unknown): Status => ({
   error: true,
 })
 
+const cloudErrorStatus = (key: TranslationKey, error: unknown): Status => {
+  if (error instanceof Error && error.message === 'membership_required') {
+    return { key: 'cloudMembershipRequired', error: true }
+  }
+  if (error instanceof Error && error.message === 'backup_not_found') {
+    return { key: 'cloudBackupMissing', error: true }
+  }
+  return errorStatus(key, error)
+}
+
 const SettingCell = ({
   label,
   description,
@@ -491,6 +502,25 @@ const SettingCell = ({
   )
 }
 
+const CloudMembership = () => {
+  const t = useTranslate()
+  const membership = useAuthStore((state) => state.backupInfo?.membership)
+  if (!membership || membership.mode === 'off') {
+    return null
+  }
+  const { tier, paidUntil, plan } = membership
+  return (
+    <SettingCell
+      label={t(tier === 'member' ? 'cloudMembershipActive' : 'cloudMembershipFree')}
+      description={tier === 'member' && paidUntil
+        ? t('cloudMembershipPaidUntil', { date: new Date(paidUntil).toLocaleString() })
+        : t('cloudMembershipPlanUnavailable', { amount: (plan.amountFen / 100).toString() })}
+      status={null}
+      action={null}
+    />
+  )
+}
+
 /** 选文件后先提示覆盖；确认后才检查文件并执行导入，任何错误都提示导入失败。 */
 const useHistoryImport = () => {
   const [file, setFile] = useState<File | null>(null)
@@ -510,11 +540,11 @@ const useHistoryImport = () => {
       const count = await task((processed, total) => setProgress({ processed, total }))
       setStatus({ key: count === 1 ? 'historyImportedOne' : 'historyImported', params: { count } })
     } catch (error) {
-      setStatus(error instanceof Error && error.message === 'backup_not_found'
-        ? { key: 'cloudBackupMissing', error: true }
-        : failureKey === 'cloudImportFailed'
-          ? errorStatus(failureKey, error)
-          : { key: failureKey, error: true })
+      if (failureKey === 'cloudImportFailed') {
+        setStatus(cloudErrorStatus(failureKey, error))
+      } else {
+        setStatus({ key: failureKey, error: true })
+      }
     } finally {
       importing.current = false
       setProgress(null)
@@ -565,7 +595,8 @@ const ImportHistory = ({
       : t('cloudBackupNotAvailable')
     : t('historyImportDescription')
 
-  const canRestore = Boolean(user && backupInfo?.exists) && !disabled && !historyImport.busy
+  const cloudAllowed = backupInfo?.membership?.cloudBackupAllowed !== false
+  const canRestore = Boolean(user && backupInfo?.exists) && cloudAllowed && !disabled && !historyImport.busy
   const confirmImportFromCloud = () => {
     setConfirmCloudImport(false)
     if (canRestore) {
@@ -578,7 +609,7 @@ const ImportHistory = ({
       <SettingCell
         className={progress ? styles.importing : undefined}
         label={t('historyImport')}
-        description={cloudDescription}
+        description={cloudAllowed ? cloudDescription : t('cloudMembershipRequired')}
         status={historyImport.status}
         action={
           <>
@@ -696,21 +727,25 @@ const ExportHistory = ({ disabled }: { disabled: boolean }) => {
       setBusy(false)
     }
   }
+  const cloudAllowed = backupInfo?.membership?.cloudBackupAllowed !== false
   const onCloudExport = () => {
-    if (!user || busy) {
+    if (!user || !cloudAllowed || busy) {
       return
     }
     setConfirmCloudExport(true)
   }
   const confirmExportToCloud = async () => {
     setConfirmCloudExport(false)
+    if (!cloudAllowed) {
+      return
+    }
     setBusy(true)
     setStatus(null)
     try {
       await exportHistoryToServer()
       setStatus({ key: 'cloudExportSuccess' })
     } catch (error) {
-      setStatus(errorStatus('cloudExportFailed', error))
+      setStatus(cloudErrorStatus('cloudExportFailed', error))
     } finally {
       setBusy(false)
       await refreshCloudBackupInfo()
@@ -724,7 +759,7 @@ const ExportHistory = ({ disabled }: { disabled: boolean }) => {
     <>
       <SettingCell
         label={t('exportAllLabel')}
-        description={description}
+        description={cloudAllowed ? description : t('cloudMembershipRequired')}
         status={status}
         action={
           <>
@@ -732,7 +767,7 @@ const ExportHistory = ({ disabled }: { disabled: boolean }) => {
               variant="outlined"
               size="m"
               className={styles.cellButton}
-              disabled={disabled || busy || empty || !user}
+              disabled={disabled || busy || empty || !user || !cloudAllowed}
               onClick={onCloudExport}
             >
               {t('cloudExport')}

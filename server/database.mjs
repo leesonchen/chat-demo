@@ -54,6 +54,25 @@ export const migrateDatabase = (db) => {
       updated_at INTEGER NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS membership_orders (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      provider TEXT NOT NULL CHECK (provider IN ('wechat', 'alipay')),
+      plan TEXT NOT NULL,
+      amount_fen INTEGER NOT NULL CHECK (amount_fen > 0),
+      currency TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'paid')),
+      provider_transaction_id TEXT,
+      created_at INTEGER NOT NULL,
+      paid_at INTEGER,
+      period_starts_at INTEGER,
+      paid_until INTEGER,
+      billing_day INTEGER,
+      UNIQUE(provider, provider_transaction_id)
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS membership_paid_by_user
+      ON membership_orders(user_id, paid_until DESC) WHERE status = 'paid';
+
     CREATE TABLE IF NOT EXISTS delegated_wechat_attempts (
       state_hash TEXT PRIMARY KEY,
       browser_hash TEXT NOT NULL,

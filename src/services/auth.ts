@@ -2,7 +2,20 @@ import { create } from 'zustand'
 import { setApiKey, useSettings } from './settings.js'
 
 export type AuthUser = { id: string; nickname: string; avatarUrl: string }
-export type CloudBackupInfo = { exists: boolean; byteSize: number; updatedAt: string | null }
+type MembershipInfo = {
+  tier: 'free' | 'member'
+  paidUntil: string | null
+  plan: { id: string; amountFen: number; currency: 'CNY'; interval: 'month' }
+  mode: 'off' | 'preview' | 'required'
+  cloudBackupAllowed: boolean
+}
+
+export type CloudBackupInfo = {
+  exists: boolean
+  byteSize: number
+  updatedAt: string | null
+  membership?: MembershipInfo
+}
 type AuthState = {
   ready: boolean
   user: AuthUser | null

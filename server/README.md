@@ -48,6 +48,14 @@ Chat Demo checks the returned AppID before matching the OpenID to an existing ac
 
 Back up the SQLite database and the `backups` directory together. Back up the encryption key separately and securely.
 
+## Cloud backup membership
+
+The plan is CNY 1 per calendar month. With `MEMBERSHIP_MODE=required`, the server requires a valid paid membership to upload or restore a cloud snapshot. Expiration preserves the snapshot. Local chats and local ZIP actions remain available.
+
+The default mode is `off`. Use `preview` to display the plan without restricting existing access. Verify `required` in an isolated environment until the provider contract, first payment, renewal, cancellation and notification verification flows are ready. The code currently contains the membership and settlement foundation; checkout and recurring payment are pending approval and integration of the merchant's channels.
+
+The auth service verifies identity. Memberships, signing agreements, orders, payment verification and entitlements belong in Chat Demo. Configure merchant IDs, plans, keys and callback URLs on the server. See the [Chinese guide](README.zh-CN.md#会员与支付) for provider onboarding.
+
 ## Tests
 
 ```sh
