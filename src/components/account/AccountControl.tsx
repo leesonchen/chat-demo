@@ -15,6 +15,9 @@ import { openSettings } from '../settings/settingsDialogState.js'
 import { showToast } from '../base/toastState.js'
 import styles from './AccountControl.module.css'
 
+// Reenable after QQ Connect approves the website application.
+const qqEntryEnabled = false
+
 export const AccountControl = () => {
   const t = useTranslate()
   const user = useAuthStore((state) => state.user)
@@ -141,7 +144,7 @@ export const AccountControl = () => {
               )}
             </div>
           )}
-          {qqLoginAvailable && !isNativeApp() && !wechatBrowser && !qqAppBrowser && (
+          {qqEntryEnabled && qqLoginAvailable && !isNativeApp() && !wechatBrowser && !qqAppBrowser && (
             <div className={styles.loginOptions}>
               <button type="button" disabled={loginBusy} onClick={onQqLogin}>
                 {t(qqStarting ? 'qqLoginOpening' : 'qqLogin')}
