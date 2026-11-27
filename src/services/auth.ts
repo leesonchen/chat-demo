@@ -20,6 +20,8 @@ type AuthState = {
   user: AuthUser | null
   loginBusy: boolean
   wechatAppLoginAvailable: boolean
+  wechatProfileSyncAvailable: boolean
+  qqLoginAvailable: boolean
   pendingWechatAccount: string | null
   needsKeyUpload: boolean
   backupInfo: CloudBackupInfo | null
@@ -36,6 +38,7 @@ const hasNativeWechatLogin = () =>
   Capacitor.getPlatform() === 'android' && Capacitor.isPluginAvailable('NativeWechat')
 export const isWechatBrowser = () =>
   !Capacitor.isNativePlatform() && /MicroMessenger/i.test(navigator.userAgent)
+export const isNativeApp = () => Capacitor.isNativePlatform()
 const readKeyOwner = () => { try { return localStorage.getItem(API_KEY_OWNER) } catch { return null } }
 const writeKeyOwner = (userId: string | null) => {
   try {
@@ -67,6 +70,8 @@ const request = async <T>(url: string, init: RequestInit = {}, timeoutMs = 10_00
 }
 export const useAuthStore = create<AuthState>(() => ({
   ready: false, user: null, loginBusy: false, wechatAppLoginAvailable: false,
+  wechatProfileSyncAvailable: true,
+  qqLoginAvailable: false,
   pendingWechatAccount: null, needsKeyUpload: false, backupInfo: null,
 }))
 
@@ -106,15 +111,25 @@ const loadAccountData = async (user: AuthUser) => {
 }
 export const initAuth = async () => {
   try {
-    const { user, wechatAppLoginAvailable } = await request<{ user: AuthUser | null; wechatAppLoginAvailable?: boolean }>(
+    const { user, wechatAppLoginAvailable, wechatProfileSyncAvailable, qqLoginAvailable } = await request<{
+      user: AuthUser | null
+      wechatAppLoginAvailable?: boolean
+      wechatProfileSyncAvailable?: boolean
+      qqLoginAvailable?: boolean
+    }>(
       hasNativeWechatLogin() ? '/api/auth/me?client=android' : '/api/auth/me',
     )
-    useAuthStore.setState({ user, wechatAppLoginAvailable: wechatAppLoginAvailable === true })
+    useAuthStore.setState({
+      user,
+      wechatAppLoginAvailable: wechatAppLoginAvailable === true,
+      wechatProfileSyncAvailable: wechatProfileSyncAvailable !== false,
+      qqLoginAvailable: qqLoginAvailable === true,
+    })
     if (user) {
       await loadAccountData(user)
     }
   } catch {
-    useAuthStore.setState({ user: null, backupInfo: null })
+    useAuthStore.setState({ user: null, backupInfo: null, qqLoginAvailable: false })
   } finally {
     useAuthStore.setState({ ready: true })
   }
@@ -129,6 +144,18 @@ export const beginWechatWebLogin = async (profile?: '1' | 'sync') => {
     const { authorizeUrl } = await request<{ authorizeUrl: string }>(startPath, {
       method: 'POST',
     })
+    window.location.assign(authorizeUrl)
+  } finally {
+    useAuthStore.setState({ loginBusy: false })
+  }
+}
+export const beginQqWebLogin = async () => {
+  if (useAuthStore.getState().loginBusy) {
+    return
+  }
+  useAuthStore.setState({ loginBusy: true, pendingWechatAccount: null })
+  try {
+    const { authorizeUrl } = await request<{ authorizeUrl: string }>('/api/auth/qq/start', { method: 'POST' })
     window.location.assign(authorizeUrl)
   } finally {
     useAuthStore.setState({ loginBusy: false })

@@ -36,6 +36,7 @@ const readWechatAuth = () => {
   return { origin, clientId, clientSecret, wechatAppId }
 }
 const wechatAuth = readWechatAuth()
+const qqLoginEnabled = process.env.QQ_LOGIN_ENABLED === '1'
 const readWechatMobileAuth = () => {
   const { WECHAT_MOBILE_APP_ID: appId, WECHAT_MOBILE_APP_SECRET: appSecret } = process.env
   if (!appId && !appSecret) return null
@@ -61,6 +62,7 @@ const server = createAppServer({
     encryptionKey,
     secureCookies: production,
     wechatAuth,
+    qqLoginEnabled,
     wechatMobileAuth,
     membershipMode,
     wechatPay,

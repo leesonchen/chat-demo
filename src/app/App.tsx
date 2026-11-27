@@ -73,8 +73,13 @@ export const App = () => {
     initChat()
     const currentUrl = new URL(window.location.href)
     const loginResult = currentUrl.searchParams.get('wechat_login')
+    const qqLoginResult = currentUrl.searchParams.get('qq_login')
     if (loginResult && ['ok', 'failed', 'cancelled', 'profile_ok', 'profile_failed', 'profile_unavailable', 'profile_mismatch'].includes(loginResult)) {
       currentUrl.searchParams.delete('wechat_login')
+      window.history.replaceState(window.history.state, '', currentUrl)
+    }
+    if (qqLoginResult && ['ok', 'failed', 'cancelled'].includes(qqLoginResult)) {
+      currentUrl.searchParams.delete('qq_login')
       window.history.replaceState(window.history.state, '', currentUrl)
     }
 
@@ -97,6 +102,15 @@ export const App = () => {
         showToast({ key: 'wechatProfileMismatch', type: 'error' })
       } else if (loginResult === 'profile_failed' || loginResult === 'profile_ok') {
         showToast({ key: 'wechatProfileSyncFailed', type: 'error' })
+      }
+      if (qqLoginResult === 'ok' && user) {
+        showToast({ key: 'qqLoggedIn' })
+        if (needsKeyUpload) {
+          openSettings('data')
+          return
+        }
+      } else if (qqLoginResult === 'failed' || qqLoginResult === 'ok') {
+        showToast({ key: 'qqLoginFailed', type: 'error' })
       }
       ensureApiKey()
     })

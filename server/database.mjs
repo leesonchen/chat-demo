@@ -97,6 +97,14 @@ export const migrateDatabase = (db) => {
     );
     CREATE INDEX IF NOT EXISTS delegated_wechat_attempts_expiry_idx ON delegated_wechat_attempts(expires_at);
 
+    CREATE TABLE IF NOT EXISTS delegated_qq_attempts (
+      state_hash TEXT PRIMARY KEY,
+      browser_hash TEXT NOT NULL,
+      verifier TEXT NOT NULL,
+      expires_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS delegated_qq_attempts_expiry_idx ON delegated_qq_attempts(expires_at);
+
     CREATE TABLE IF NOT EXISTS mobile_wechat_attempts (
       state_hash TEXT PRIMARY KEY,
       browser_hash TEXT NOT NULL,

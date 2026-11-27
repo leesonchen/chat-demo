@@ -2,9 +2,11 @@ import { useState } from 'react'
 import { useTranslate } from '../../i18n/index.js'
 import {
   beginNativeWechatLogin,
+  beginQqWebLogin,
   beginWechatWebLogin,
   createNativeWechatAccount,
   dismissNativeWechatAccount,
+  isNativeApp,
   isWechatBrowser,
   logout,
   useAuthStore,
@@ -20,9 +22,24 @@ export const AccountControl = () => {
   const loginBusy = useAuthStore((state) => state.loginBusy)
   const pendingWechatAccount = useAuthStore((state) => state.pendingWechatAccount)
   const native = useAuthStore((state) => state.wechatAppLoginAvailable)
+  const wechatProfileSyncAvailable = useAuthStore((state) => state.wechatProfileSyncAvailable)
+  const qqLoginAvailable = useAuthStore((state) => state.qqLoginAvailable)
   const wechatBrowser = isWechatBrowser()
+  const qqAppBrowser = /\bQQ\/[\d.]+/i.test(navigator.userAgent)
   const [menuOpen, setMenuOpen] = useState(false)
   const [brokenAvatar, setBrokenAvatar] = useState('')
+  const [qqStarting, setQqStarting] = useState(false)
+
+  const onQqLogin = async () => {
+    setQqStarting(true)
+    try {
+      await beginQqWebLogin()
+    } catch {
+      showToast({ key: 'qqLoginFailed', type: 'error' })
+    } finally {
+      setQqStarting(false)
+    }
+  }
 
   const onLogin = async (action: 'native' | 'web' | 'profile' | 'sync' | 'link' | 'create') => {
     try {
@@ -83,9 +100,9 @@ export const AccountControl = () => {
           </button>
           {menuOpen ? (
             <div className={styles.menu} role="menu">
-              <div className={styles.menuUser}>{t('wechatAccountSignedIn')}</div>
+              <div className={styles.menuUser}>{t('accountSignedIn')}</div>
               <button type="button" role="menuitem" onClick={() => openSettings('data')}>{t('wechatAccountSettings')}</button>
-              {wechatBrowser && (
+              {wechatBrowser && wechatProfileSyncAvailable && (
                 <button type="button" role="menuitem" disabled={loginBusy} onClick={() => onLogin('sync')}>
                   {t(loginBusy ? 'wechatLoginOpening' : 'wechatSyncProfile')}
                 </button>
@@ -108,7 +125,7 @@ export const AccountControl = () => {
             onLogin(pendingWechatAccount ? 'create' : native ? 'native' : wechatBrowser ? 'profile' : 'web')
           }>
             <span className={styles.avatar}>{t('wechatUser').slice(0, 1)}</span>
-            {t(loginBusy ? 'wechatLoginOpening' : pendingWechatAccount ? 'wechatCreateAccount'
+            {t(loginBusy && !qqStarting ? 'wechatLoginOpening' : pendingWechatAccount ? 'wechatCreateAccount'
               : native ? 'wechatAppLogin' : wechatBrowser ? 'wechatLoginWithProfile' : 'wechatLogin')}
           </button>
           {wechatBrowser && (
@@ -122,6 +139,13 @@ export const AccountControl = () => {
               {pendingWechatAccount && (
                 <button type="button" onClick={dismissNativeWechatAccount}>{t('wechatLoginCancel')}</button>
               )}
+            </div>
+          )}
+          {qqLoginAvailable && !isNativeApp() && !wechatBrowser && !qqAppBrowser && (
+            <div className={styles.loginOptions}>
+              <button type="button" disabled={loginBusy} onClick={onQqLogin}>
+                {t(qqStarting ? 'qqLoginOpening' : 'qqLogin')}
+              </button>
             </div>
           )}
         </div>

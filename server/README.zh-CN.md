@@ -1,10 +1,15 @@
 # Chat Demo 账号与云端备份服务
 
-本服务为 chat-demo 提供微信登录、账号 API Key 保存和手动聊天记录云端备份。未部署服务端时，原有本地聊天功能仍可独立使用。
+本服务为 chat-demo 提供微信和 QQ 网页登录、账号 API Key 保存和手动聊天记录云端备份。未部署服务端时，原有本地聊天功能仍可独立使用。
 
 ## 注册认证客户端
 
-在独立微信认证服务中为 Chat Demo 登记客户端 ID、独立密钥和完整的 HTTPS 回调地址，例如 `https://chat.example.com/api/auth/wechat/callback`。这是认证服务将电脑浏览器送回 Chat Demo 的地址。公众号后台的网页授权域名配置认证服务本身的主机名。
+在共享认证服务中为 Chat Demo 登记客户端 ID、独立密钥和完整的 HTTPS 回调地址：
+
+- 微信：`https://chat.example.com/api/auth/wechat/callback`
+- QQ：`https://chat.example.com/api/auth/qq/callback`
+
+如要开放 QQ，在该客户端项中设置 `"allowQq": true` 和 `"allowProfile": true`。认证服务的 QQ 互联回调配置见下文。公众号后台的网页授权域名配置认证服务本身的主机名。
 
 ## 配置服务端
 
@@ -21,6 +26,7 @@ chmod 600 server/.env
 - `AUTH_SERVICE_ORIGIN=https://auth.example.com`
 - `AUTH_CLIENT_ID` 和 `AUTH_CLIENT_SECRET`：在独立认证服务中登记的客户端凭据。
 - `WECHAT_APP_ID`：已有 Chat Demo 账号所使用的微信服务号 AppID。
+- `QQ_LOGIN_ENABLED=1`：完成 QQ 互联和共享认证服务配置后再开启。
 - `API_KEY_ENCRYPTION_KEY`：使用 `openssl rand -base64 32` 生成 32 字节密钥。
 - `DATA_DIR`：SQLite 数据库和 ZIP 备份的持久化目录。
 
@@ -68,13 +74,23 @@ server {
 
 ## 微信扫码登录流程
 
-微信内打开网页版时，可以通过同一个服务号的网页授权直接返回 Chat Demo 并复用已有账号。用户可选择仅登录，或授权同步昵称和头像。已登录的用户可从账号菜单补同步，服务端会核对当前会话和微信身份。独立认证服务需要支持 `mode=wechat_browser`，同步资料还需要为该客户端配置 `allowProfile`。在普通浏览器中打开时，可以按下面的步骤扫码登录。
+微信内打开网页版时，可以通过同一个服务号的网页授权直接返回 Chat Demo 并复用已有账号。用户可选择仅登录，或授权同步昵称和头像。已用微信登录的用户可从账号菜单补同步。独立认证服务需要支持 `mode=wechat_browser` 和用于仅登录的 `/authorize/basic`。在普通浏览器中打开时，可以按下面的步骤扫码登录。
 
 1. 在 Chat Demo 点「微信扫码登录」，跳到独立认证服务的二维码页面。
 2. 手机扫码成功后，电脑回到 Chat Demo，并带回一个一次性登录码。
 3. Chat Demo 校验浏览器的登录状态，再用自己的客户端凭据和 PKCE 凭证兑换身份，创建本地会话。
 
-Chat Demo 会先核对认证结果里的 AppID，再用 OpenID 找回原账号。API Key 和云备份仍归属该账号。如需昵称和头像，在独立认证服务的客户端配置中为 Chat Demo 开启资料授权。用户可在扫码页面主动勾选，Chat Demo 保存授权返回的昵称和头像。普通扫码会保留此前已保存的资料。
+Chat Demo 会先核对认证结果里的 AppID，再用 OpenID 找回原账号。API Key 和云备份仍归属该账号。Chat Demo 保存授权返回的昵称和头像。认证结果只包含身份时，会保留此前保存的资料。
+
+## 启用网页 QQ 登录/注册
+
+1. 在 [QQ 互联开放平台](https://connect.qq.com/)完成开发者注册与审核，在管理中心创建“网站应用”。这里只需要网站应用，不需要 Android 或 iOS 移动应用。按 QQ 平台要求填写应用名称、网站信息、备案信息等，并等待应用审核通过。
+2. QQ 互联应用的“网站回调地址”填写完整 URL：`https://<AUTH_SERVICE_ORIGIN主机名>/qq/callback`。例如认证服务是 `https://auth.example.com`，就填写 `https://auth.example.com/qq/callback`。这是 QQ 平台的回调地址。
+3. 将 QQ 互联生成的 AppID 和 AppKey 写入**共享认证服务**的 `QQ_APP_ID`、`QQ_APP_KEY`，不要写进网页前端或 Android 包。认证服务的 QQ OAuth 回调路径固定为 `/qq/callback`。
+4. 在共享认证服务的 `clients.json` 中，为 Chat Demo 客户端增加 `https://chat.example.com/api/auth/qq/callback`，并设置 `"allowQq": true`、`"allowProfile": true`。这是共享认证服务回调 Chat Demo 的第二个地址，与第 2 步的 QQ 平台回调地址不同。重启认证服务。
+5. 在 `chat-demo/server/.env` 设置 `QQ_LOGIN_ENABLED=1`，确认现有 `AUTH_SERVICE_ORIGIN`、`AUTH_CLIENT_ID`、`AUTH_CLIENT_SECRET` 与客户端登记一致，然后重启 Chat Demo 后端。
+
+普通网页浏览器访问 Chat Demo 后，账号菜单会出现「QQ 登录 / 注册」。用户首次通过 QQ 登录时会创建账号，再次使用同一 QQ 登录会恢复原账号；QQ 昵称和头像经用户授权后保存。QQ 身份与微信 OpenID 独立，当前不会按昵称或头像把已有微信账号自动合并。QQ 互联的[网站 OAuth 文档](https://wiki.connect.qq.com/%E4%BD%BF%E7%94%A8authorization_code%E8%8E%B7%E5%8F%96access_token/)说明 App 内嵌 H5 不支持网站登录，因此请在系统浏览器中打开 Chat Demo。
 
 ## 启用 Android 微信登录
 
@@ -91,7 +107,7 @@ Chat Demo 会先核对认证结果里的 AppID，再用 OpenID 找回原账号�
 - 恢复云端备份会整体替换当前设备本地历史，不做合并。
 - ZIP 保留完整消息树和本地可用的图片原件；非图片附件原件沿用现有导出行为，仅保留元数据。
 - API Key 使用 AES-256-GCM 加密保存，不进入聊天 ZIP 或请求日志。登录后通过认证 HTTPS 会话恢复到浏览器，DeepSeek 聊天请求仍由浏览器直接发送。
-- 本阶段不做自动同步、实时多设备协作、冲突合并、QQ 登录或公众号消息推送回调。
+- QQ 账号通过 QQ AppID 和用户 OpenID 一起识别。
 
 ## 会员与支付
 

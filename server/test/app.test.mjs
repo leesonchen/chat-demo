@@ -27,6 +27,7 @@ const makeServer = async (options = {}) => {
       encryptionKey: key,
       secureCookies: Boolean(options.secureCookies),
       wechatAuth: options.wechatAuth,
+      qqLoginEnabled: options.qqLoginEnabled,
       wechatMobileAuth: options.wechatMobileAuth,
       wechatPay: options.wechatPay,
       membershipMode: options.membershipMode,
@@ -264,7 +265,9 @@ test('WeChat browser selects webpage authorization and cancellation consumes onl
   const start = await fetch(app.baseUrl + '/api/auth/wechat/start', {
     method: 'POST', headers: { Origin: appOrigin, 'User-Agent': 'Mozilla/5.0 MicroMessenger/8.0' },
   })
-  const params = new URL((await start.json()).authorizeUrl).searchParams
+  const authorize = new URL((await start.json()).authorizeUrl)
+  assert.equal(authorize.pathname, '/authorize/basic')
+  const params = authorize.searchParams
   assert.equal(params.get('mode'), 'wechat_browser')
   const url = app.baseUrl + callbackPath + '?' + new URLSearchParams({ state: params.get('state'), error: 'access_denied' })
   const cookie = cookiePair(start.headers.get('set-cookie'))
@@ -295,7 +298,9 @@ test('WeChat browser profile sync updates only the current authorized account an
     headers: { Origin: appOrigin, 'User-Agent': 'MicroMessenger', ...(cookie && { Cookie: cookie }) },
   })
   const authorizeWithProfile = await start('1')
-  assert.equal(new URL((await authorizeWithProfile.json()).authorizeUrl).searchParams.get('include_profile'), '1')
+  const authorizeUrl = new URL((await authorizeWithProfile.json()).authorizeUrl)
+  assert.equal(authorizeUrl.pathname, '/authorize')
+  assert.equal(authorizeUrl.searchParams.get('include_profile'), '1')
   assert.equal((await start('sync')).status, 401)
   const callback = async ({ session = signedIn } = {}) => {
     const response = await start('sync', signedIn)
@@ -415,6 +420,64 @@ test('delegated login restores the existing account and applies only authorized 
     user: { id: app.userId, nickname: profile.nickname, avatarUrl: avatar },
   })
   assert.equal(app.db.prepare('SELECT count(*) AS count FROM users').get().count, 1)
+})
+
+test('QQ login binds the callback to the browser and identifies the account by AppID and OpenID', async t => {
+  const qqCallbackPath = '/api/auth/qq/callback'
+  let authorize
+  let appid = '123456789'
+  let exchanges = 0
+  const profile = { nickname: 'QQ 昵称', avatarUrl: 'https://q.qlogo.cn/qqapp/example/100' }
+  const app = await makeServer({
+    wechatAuth,
+    qqLoginEnabled: true,
+    fetchImpl: async (url, request) => {
+      exchanges++
+      assert.equal(url.href, wechatAuth.origin + '/exchange')
+      assert.equal(request.headers.Authorization,
+        'Basic ' + Buffer.from(`${wechatAuth.clientId}:${wechatAuth.clientSecret}`).toString('base64'))
+      const body = JSON.parse(request.body)
+      assert.equal(body.redirect_uri, appOrigin + qqCallbackPath)
+      assert.equal(createHash('sha256').update(body.code_verifier).digest('base64url'),
+        authorize.searchParams.get('code_challenge'))
+      return Response.json({ provider: 'qq', appid, openid: 'same-openid', profile })
+    },
+  })
+  t.after(app.close)
+
+  const start = async () => {
+    const response = await fetch(app.baseUrl + '/api/auth/qq/start', { method: 'POST', headers: { Origin: appOrigin } })
+    assert.equal(response.status, 200)
+    authorize = new URL((await response.json()).authorizeUrl)
+    assert.equal(authorize.searchParams.get('provider'), 'qq')
+    const params = new URLSearchParams({ code: 'C'.repeat(43), state: authorize.searchParams.get('state') })
+    const cookie = cookiePair(response.headers.get('set-cookie'))
+    return (withCookie = true) => fetch(app.baseUrl + qqCallbackPath + '?' + params, {
+      redirect: 'manual', headers: withCookie ? { Cookie: cookie } : {},
+    })
+  }
+  const finish = async callback => {
+    const result = await callback()
+    assert.equal(result.headers.get('location'), '/?qq_login=ok')
+    const [session] = result.headers.getSetCookie()
+    const me = await fetch(app.baseUrl + '/api/auth/me', {
+      headers: { Cookie: cookiePair(session), 'User-Agent': 'MicroMessenger/8.0' },
+    })
+    const { user, wechatProfileSyncAvailable } = await me.json()
+    assert.equal(wechatProfileSyncAvailable, false)
+    assert.equal(user.nickname, profile.nickname)
+    assert.equal(user.avatarUrl, profile.avatarUrl)
+    return user.id
+  }
+  const first = await start()
+  assert.equal((await first(false)).headers.get('location'), '/?qq_login=failed')
+  assert.equal(exchanges, 0)
+  const userId = await finish(first)
+  assert.equal((await first()).headers.get('location'), '/?qq_login=failed')
+  assert.equal(await finish(await start()), userId)
+  appid = '987654321'
+  assert.notEqual(await finish(await start()), userId)
+  assert.equal(exchanges, 3)
 })
 
 test('expired state and identities from another WeChat AppID do not create sessions', async (t) => {

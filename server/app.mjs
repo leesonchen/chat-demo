@@ -13,6 +13,8 @@ const COOKIE = 'chat_demo_session'
 const SESSION_TTL = 30 * 24 * 60 * 60 * 1000
 const LOGIN_COOKIE = 'chat_demo_wechat_login'
 const WECHAT_CALLBACK_PATH = '/api/auth/wechat/callback'
+const QQ_LOGIN_COOKIE = 'chat_demo_qq_login'
+const QQ_CALLBACK_PATH = '/api/auth/qq/callback'
 const MOBILE_LOGIN_COOKIE = 'chat_demo_wechat_mobile'
 const MOBILE_LOGIN_PATH = '/api/auth/wechat/mobile'
 const LOGIN_TTL = 10 * 60 * 1000
@@ -62,6 +64,8 @@ const requireBackupMembership = (db, userId, time, mode) => {
 }
 const loginCookie = (token, secure, maxAge) =>
   `${LOGIN_COOKIE}=${token}; HttpOnly; Path=${WECHAT_CALLBACK_PATH}; SameSite=Lax; Max-Age=${maxAge}${secure ? '; Secure' : ''}`
+const qqLoginCookie = (token, secure, maxAge) =>
+  `${QQ_LOGIN_COOKIE}=${token}; HttpOnly; Path=${QQ_CALLBACK_PATH}; SameSite=Lax; Max-Age=${maxAge}${secure ? '; Secure' : ''}`
 
 const beginWechatLogin = (req, res, url, config, db, time) => {
   if (!config.wechatAuth) throw new HttpError(503, 'wechat_login_not_configured')
@@ -83,7 +87,8 @@ const beginWechatLogin = (req, res, url, config, db, time) => {
     VALUES (?, ?, ?, ?, ?)
   `).run(sha256(state), sha256(browserToken), verifier, profileSessionHash, time + LOGIN_TTL)
 
-  const authorize = new URL('/authorize', origin)
+  const basicLogin = wechatBrowser && profile !== '1' && !syncProfile
+  const authorize = new URL(basicLogin ? '/authorize/basic' : '/authorize', origin)
   authorize.search = new URLSearchParams({
     client_id: clientId,
     redirect_uri: redirectUri,
@@ -93,10 +98,42 @@ const beginWechatLogin = (req, res, url, config, db, time) => {
   }).toString()
   if (wechatBrowser) {
     authorize.searchParams.set('mode', 'wechat_browser')
-    if (profile === '1' || syncProfile) authorize.searchParams.set('include_profile', '1')
+    if (!basicLogin) authorize.searchParams.set('include_profile', '1')
   }
   return json(res, 200, { authorizeUrl: authorize.href }, {
     'Set-Cookie': loginCookie(browserToken, config.secureCookies, LOGIN_TTL / 1000),
+  })
+}
+
+const beginQqLogin = (req, res, config, db, time) => {
+  if (!config.qqLoginEnabled || !config.wechatAuth) throw new HttpError(503, 'qq_login_not_configured')
+  if (/MicroMessenger|QQ\/[\d.]+/i.test(req.headers['user-agent'] ?? '')) {
+    throw new HttpError(400, 'qq_login_unavailable_in_app_browser')
+  }
+  const { origin, clientId } = config.wechatAuth
+  const state = loginToken()
+  const browserToken = loginToken()
+  const verifier = loginToken()
+  const challenge = createHash('sha256').update(verifier).digest('base64url')
+  const redirectUri = new URL(QQ_CALLBACK_PATH, config.appOrigin).href
+
+  db.prepare('DELETE FROM delegated_qq_attempts WHERE expires_at <= ?').run(time)
+  db.prepare(`
+    INSERT INTO delegated_qq_attempts (state_hash, browser_hash, verifier, expires_at)
+    VALUES (?, ?, ?, ?)
+  `).run(sha256(state), sha256(browserToken), verifier, time + LOGIN_TTL)
+
+  const authorize = new URL('/authorize', origin)
+  authorize.search = new URLSearchParams({
+    client_id: clientId,
+    redirect_uri: redirectUri,
+    state,
+    code_challenge: challenge,
+    code_challenge_method: 'S256',
+    provider: 'qq',
+  }).toString()
+  return json(res, 200, { authorizeUrl: authorize.href }, {
+    'Set-Cookie': qqLoginCookie(browserToken, config.secureCookies, LOGIN_TTL / 1000),
   })
 }
 
@@ -112,7 +149,21 @@ const readDisplayProfile = profile => {
   return { nickname, avatarUrl }
 }
 
-const updateWechatDisplayProfile = (db, userId, profile, time) => {
+const readQqDisplayProfile = profile => {
+  const nickname = typeof profile?.nickname === 'string'
+    ? Array.from(profile.nickname.trim()).slice(0, 80).join('')
+    : ''
+  const avatar = typeof profile?.avatarUrl === 'string' && profile.avatarUrl.length <= 2048
+    ? URL.parse(profile.avatarUrl)
+    : null
+  const isQqAvatar = avatar?.hostname === 'qlogo.cn' || avatar?.hostname.endsWith('.qlogo.cn')
+  const avatarUrl = avatar?.protocol === 'https:' && isQqAvatar && !avatar.username && !avatar.password && !avatar.port
+    ? avatar.href
+    : ''
+  return { nickname, avatarUrl }
+}
+
+const updateDisplayProfile = (db, userId, profile, time) => {
   db.prepare(`
     UPDATE users SET nickname = COALESCE(NULLIF(?, ''), nickname),
       avatar_url = COALESCE(NULLIF(?, ''), avatar_url), updated_at = ?
@@ -124,9 +175,10 @@ const wechatIdPattern = /^[A-Za-z0-9_-]{1,128}$/
 const readWechatId = value => typeof value === 'string' && wechatIdPattern.test(value) ? value : null
 const mobileProvider = config => config.wechatMobileAuth && `wechat_mobile:${config.wechatMobileAuth.appId}`
 
-const issueWechatSession = (db, {
+const issueIdentitySession = (db, {
   provider = 'wechat', otherProvider, openid, unionid, profile, linkUserId, allowCreate = true,
 }, time) => {
+  const providerError = provider.startsWith('qq:') ? 'qq' : 'wechat'
   const sessionToken = loginToken()
   db.exec('BEGIN IMMEDIATE')
   try {
@@ -140,7 +192,7 @@ const issueWechatSession = (db, {
     if (identity) matchingUsers.add(identity.user_id)
     if (linkUserId) matchingUsers.add(linkUserId)
     if (matchingUsers.size > 1 || (identity?.unionid && unionid && identity.unionid !== unionid)) {
-      throw new HttpError(409, 'wechat_account_conflict')
+      throw new HttpError(409, `${providerError}_account_conflict`)
     }
     const [existingUserId] = matchingUsers
     if (!existingUserId && !allowCreate) {
@@ -150,18 +202,18 @@ const issueWechatSession = (db, {
     const userId = existingUserId ?? randomUUID()
     if (!existingUserId) {
       db.prepare('INSERT INTO users (id, nickname, avatar_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
-        .run(userId, profile.nickname || '微信用户', profile.avatarUrl, time, time)
+        .run(userId, profile.nickname || (providerError === 'qq' ? 'QQ用户' : '微信用户'), profile.avatarUrl, time, time)
     } else {
       if (db.prepare('SELECT status FROM users WHERE id = ?').get(userId)?.status !== 'active') {
-        throw new HttpError(403, 'wechat_account_inactive')
+        throw new HttpError(403, `${providerError}_account_inactive`)
       }
       const conflictingIdentity = db.prepare(`
         SELECT 1 FROM oauth_identities WHERE user_id = ? AND (
           (provider = ? AND openid <> ?) OR (provider = ? AND unionid IS NOT NULL AND unionid <> ?)
         )
       `).get(userId, provider, openid, otherProvider ?? provider, unionid ?? null)
-      if (conflictingIdentity) throw new HttpError(409, 'wechat_account_conflict')
-      updateWechatDisplayProfile(db, userId, profile, time)
+      if (conflictingIdentity) throw new HttpError(409, `${providerError}_account_conflict`)
+      updateDisplayProfile(db, userId, profile, time)
     }
     if (identity) {
       db.prepare(`
@@ -183,14 +235,69 @@ const issueWechatSession = (db, {
   }
 }
 
-const returnFromLogin = (res, status, cookies = []) => {
+const returnFromLogin = (res, status, cookies = [], provider = 'wechat') => {
   res.writeHead(303, {
-    Location: `/?wechat_login=${status}`,
+    Location: `/?${provider}_login=${status}`,
     'Cache-Control': 'no-store',
     'Referrer-Policy': 'no-referrer',
     ...(cookies.length ? { 'Set-Cookie': cookies } : {}),
   })
   res.end()
+}
+
+const qqCallback = async (req, res, url, { db, config, fetchImpl, now }) => {
+  const state = url.searchParams.get('state') ?? ''
+  const code = url.searchParams.get('code') ?? ''
+  const error = url.searchParams.get('error')
+  const rejected = !code && (error === 'access_denied' || error === 'temporarily_unavailable')
+  const browserToken = readCookie(req.headers.cookie, QQ_LOGIN_COOKIE) ?? ''
+  if (!config.qqLoginEnabled || !config.wechatAuth || !loginTokenPattern.test(state) ||
+      !loginTokenPattern.test(browserToken) || (!rejected && !loginTokenPattern.test(code))) {
+    return returnFromLogin(res, 'failed', [], 'qq')
+  }
+  const attempt = db.prepare(`
+    DELETE FROM delegated_qq_attempts
+    WHERE state_hash = ? AND browser_hash = ? AND expires_at > ?
+    RETURNING verifier
+  `).get(sha256(state), sha256(browserToken), now())
+  if (!attempt) return returnFromLogin(res, 'failed', [], 'qq')
+
+  const clearLogin = qqLoginCookie('', config.secureCookies, 0)
+  if (rejected) {
+    return returnFromLogin(res, error === 'access_denied' ? 'cancelled' : 'failed', [clearLogin], 'qq')
+  }
+  const { origin, clientId, clientSecret } = config.wechatAuth
+  try {
+    const response = await fetchImpl(new URL('/exchange', origin), {
+      method: 'POST',
+      headers: {
+        Authorization: 'Basic ' + Buffer.from(`${clientId}:${clientSecret}`).toString('base64'),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        code,
+        redirect_uri: new URL(QQ_CALLBACK_PATH, config.appOrigin).href,
+        code_verifier: attempt.verifier,
+      }),
+      redirect: 'error',
+      signal: AbortSignal.timeout(8_000),
+    })
+    if (!response.ok) throw new Error('QQ login code exchange failed')
+    const identity = await response.json()
+    if (identity?.provider !== 'qq' || typeof identity.appid !== 'string' ||
+        !/^\d{1,32}$/.test(identity.appid) || !readWechatId(identity.openid)) {
+      throw new Error('Unexpected QQ identity')
+    }
+    const profile = readQqDisplayProfile(identity.profile)
+    const sessionToken = issueIdentitySession(db, {
+      provider: `qq:${identity.appid}`, openid: identity.openid, profile,
+    }, now())
+    process.stdout.write('[chat-demo-server] delegated QQ login succeeded\n')
+    return returnFromLogin(res, 'ok', [setCookie(sessionToken, config.secureCookies), clearLogin], 'qq')
+  } catch {
+    process.stderr.write('[chat-demo-server] delegated QQ login failed\n')
+    return returnFromLogin(res, 'failed', [clearLogin], 'qq')
+  }
 }
 
 const wechatCallback = async (req, res, url, { db, config, fetchImpl, now }) => {
@@ -249,10 +356,10 @@ const wechatCallback = async (req, res, url, { db, config, fetchImpl, now }) => 
       `).get(identity.openid, session.user.id)
       if (!sameAccount) return returnFromLogin(res, 'profile_mismatch', [clearLogin])
       if (!profile.nickname && !profile.avatarUrl) return returnFromLogin(res, 'profile_unavailable', [clearLogin])
-      updateWechatDisplayProfile(db, session.user.id, profile, now())
+      updateDisplayProfile(db, session.user.id, profile, now())
       return returnFromLogin(res, 'profile_ok', [clearLogin])
     }
-    const sessionToken = issueWechatSession(db, {
+    const sessionToken = issueIdentitySession(db, {
       openid: identity.openid, unionid: readWechatId(identity.unionid),
       otherProvider: mobileProvider(config), profile,
     }, now())
@@ -340,7 +447,7 @@ const completeMobileWechatLogin = async (req, res, { db, config, fetchImpl, now 
   if (attempt.expires_at <= now()) throw new HttpError(400, 'invalid_wechat_login')
   verifyLinkSession()
   if (attempt.link_user_id && !identity.unionid) throw new HttpError(502, 'wechat_login_failed')
-  const sessionToken = issueWechatSession(db, {
+  const sessionToken = issueIdentitySession(db, {
     ...identity, provider: mobileProvider(config), otherProvider: config.wechatAuth ? 'wechat' : undefined,
     linkUserId: attempt.link_user_id, allowCreate: createAccount,
   }, now())
@@ -400,8 +507,15 @@ export const createAppServer = ({ db, config, fetchImpl = fetch, now = Date.now 
         verifyOrigin(req, config)
         return beginWechatLogin(req, res, url, config, db, time)
       }
+      if (method === 'POST' && url.pathname === '/api/auth/qq/start') {
+        verifyOrigin(req, config)
+        return beginQqLogin(req, res, config, db, time)
+      }
       if (method === 'GET' && url.pathname === WECHAT_CALLBACK_PATH) {
         return await wechatCallback(req, res, url, { db, config, fetchImpl, now })
+      }
+      if (method === 'GET' && url.pathname === QQ_CALLBACK_PATH) {
+        return await qqCallback(req, res, url, { db, config, fetchImpl, now })
       }
       if (method === 'POST' && url.pathname.startsWith(MOBILE_LOGIN_PATH + '/')) {
         verifyOrigin(req, config)
@@ -414,9 +528,17 @@ export const createAppServer = ({ db, config, fetchImpl = fetch, now = Date.now 
       }
       if (method === 'GET' && url.pathname === '/api/auth/me') {
         const session = getSession(req, db, time)
+        const android = url.searchParams.get('client') === 'android'
+        const qqLoginAvailable = !android && config.qqLoginEnabled && config.wechatAuth
+        const inWechat = /MicroMessenger/i.test(req.headers['user-agent'] ?? '')
+        const wechatProfileSyncAvailable = inWechat && session && db.prepare(`
+          SELECT 1 FROM oauth_identities WHERE user_id = ? AND provider = 'wechat'
+        `).get(session.user.id)
         return json(res, 200, {
           user: session?.user ?? null,
-          ...(url.searchParams.get('client') === 'android' && { wechatAppLoginAvailable: Boolean(config.wechatMobileAuth) }),
+          ...(qqLoginAvailable && { qqLoginAvailable: true }),
+          ...(inWechat && session && { wechatProfileSyncAvailable: Boolean(wechatProfileSyncAvailable) }),
+          ...(android && { wechatAppLoginAvailable: Boolean(config.wechatMobileAuth) }),
         })
       }
       if (method === 'POST' && url.pathname === '/api/auth/logout') {

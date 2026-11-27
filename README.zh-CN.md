@@ -45,7 +45,7 @@ API Key 和设置保存在浏览器 localStorage，会话及附件原件保存�
 
 ## 可选账号与云端备份
 
-默认仍可完全离线使用本地会话功能。部署可选的账号服务后，可以使用微信扫码登录、在账号中加密保存 DeepSeek API Key，并在「设置 → 数据管理」中手动导出到服务器或从服务器导入聊天记录。第一阶段不做自动同步或多设备实时协作。
+默认仍可完全离线使用本地会话功能。部署可选的账号服务后，可以使用微信或 QQ 登录/注册、在账号中加密保存 DeepSeek API Key，并在「设置 → 数据管理」中手动导出到服务器或从服务器导入聊天记录。第一阶段不做自动同步或多设备实时协作。
 
 服务端部署、现有微信公众号网页授权配置和数据保护说明见[账号与云端备份服务](server/README.zh-CN.md)。
 
@@ -56,6 +56,8 @@ API Key 和设置保存在浏览器 localStorage，会话及附件原件保存�
 准备 JDK 21 和 Android SDK API 36，在仓库根目录运行 `pnpm android:sync`，再用 Android Studio 打开 `android/` 或运行 `cd android && ./gradlew :app:assembleDebug`。Android 版内置 `dist/`，账号和云备份请求使用 `deepseek.leeson.top`。需要更新 Web 界面时，重新执行同步和打包。
 
 配置微信开放平台的移动应用后，Android 版的「微信登录」会直接打开微信授权，确认后返回聊天。「扫码登录已有账号」仍可用于旧账号关联。移动应用注册、签名与后端配置见[启用 Android 微信登录](server/README.zh-CN.md#启用-android-微信登录)。
+
+QQ 登录只显示在普通网页浏览器中；QQ 互联不支持在其他 App 内嵌的 H5 页面完成网站 OAuth 登录，也不改变 Android 版的微信登录。
 
 | 命令          | 用途                |
 | ------------- | ------------------- |
